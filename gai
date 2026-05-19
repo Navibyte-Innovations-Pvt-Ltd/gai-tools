@@ -1,0 +1,203 @@
+#!/usr/bin/env bash
+# gai — AI git commit using local Ollama (qwen2.5-coder:1.5b)
+# Usage: gai [--all] [--dry-run]
+#
+#   Default (no flags): commit STAGED files one by one
+#   --all              : commit ALL dirty files one by one
+#   --dry-run          : print messages, don't commit
+
+set -euo pipefail
+
+MODEL="${GAI_MODEL:-qwen2.5-coder:1.5b}"
+OLLAMA_URL="http://localhost:11434/api/generate"
+DRY_RUN=false
+MODE="staged"
+
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run|-n) DRY_RUN=true ;;
+    --all)        MODE="all" ;;
+    --help|-h)
+      echo "Usage: gai [--all] [--dry-run]"
+      echo "  Default : commit staged files one by one (AI message per file)"
+      echo "  --all   : commit all dirty files instead of staged"
+      echo "  --dry-run: show messages without committing"
+      echo ""
+      echo "Model: \$GAI_MODEL (default: $MODEL)"
+      echo "Requires: ollama running + model pulled"
+      echo "  brew install ollama && ollama pull $MODEL"
+      exit 0
+      ;;
+  esac
+done
+
+# ── sanity checks ────────────────────────────────────────────────────────────
+
+if ! git rev-parse --git-dir > /dev/null 2>&1; then
+  echo "error: not inside a git repository" >&2
+  exit 1
+fi
+
+if ! curl -s --connect-timeout 2 "http://localhost:11434" > /dev/null 2>&1; then
+  echo "error: Ollama not running." >&2
+  echo "  Start:   ollama serve" >&2
+  echo "  Install: brew install ollama && ollama pull $MODEL" >&2
+  exit 1
+fi
+
+# ── helpers ──────────────────────────────────────────────────────────────────
+
+is_secret() {
+  local f="$1"
+  [[ "$f" == *".env"* || "$f" == *"credentials"* || "$f" == *"secret"* || \
+     "$f" == *".key"  || "$f" == *"id_rsa"*       || "$f" == *"id_ed25519"* ]]
+}
+
+gen_message() {
+  local file="$1" diff="$2"
+  local prompt="Write a git commit message in conventional commit format for this diff.
+Reply with ONLY the commit message on one line. No explanation. No backticks. No quotes.
+
+Format: type(scope): short description
+Types: feat fix refactor style docs test chore perf
+Scope: most specific component or directory name from path: $file
+Description: imperative mood, max 60 chars.
+
+Diff:
+$diff"
+
+  local escaped
+  escaped=$(python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" <<< "$prompt")
+
+  local response
+  response=$(curl -s --connect-timeout 10 "$OLLAMA_URL" \
+    -H "Content-Type: application/json" \
+    -d "{\"model\":\"$MODEL\",\"prompt\":$escaped,\"stream\":false}")
+
+  python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+msg = d.get('response', '').strip()
+lines = [l.strip() for l in msg.splitlines() if l.strip()]
+print(lines[0] if lines else '')
+" <<< "$response"
+}
+
+commit_file() {
+  local file="$1"
+
+  if is_secret "$file"; then
+    echo "  ⚠ skip (secret): $file"
+    return 1
+  fi
+  if [[ ! -e "$file" ]]; then
+    echo "  ⚠ skip (missing): $file"
+    return 1
+  fi
+
+  echo ""
+  echo "── $file"
+
+  local diff
+  diff=$(git diff --cached -- "$file")
+  if [[ -z "$diff" ]]; then
+    echo "  (empty staged diff — skipping)"
+    return 1
+  fi
+
+  local msg
+  msg=$(gen_message "$file" "$diff")
+  if [[ -z "$msg" ]]; then
+    echo "  ✗ model returned empty message — skipping"
+    return 1
+  fi
+
+  echo "  → $msg"
+
+  if $DRY_RUN; then
+    echo "  (dry-run)"
+  else
+    git commit -m "$msg"
+  fi
+  return 0
+}
+
+# ── staged mode (default) ────────────────────────────────────────────────────
+
+if [[ "$MODE" == "staged" ]]; then
+  FILES=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && FILES+=("$line")
+  done < <(git diff --cached --name-only)
+
+  if [[ ${#FILES[@]} -eq 0 ]]; then
+    echo "No staged files. Stage files with 'git add', or use --all for all dirty files."
+    exit 0
+  fi
+
+  echo "Staged: ${#FILES[@]} file(s) → committing one by one…"
+
+  git reset HEAD > /dev/null 2>&1
+
+  COMMITTED=0 SKIPPED=()
+  for FILE in "${FILES[@]}"; do
+    git add -- "$FILE"
+    if commit_file "$FILE"; then
+      COMMITTED=$((COMMITTED + 1))
+    else
+      git reset HEAD -- "$FILE" > /dev/null 2>&1 || true
+      SKIPPED+=("$FILE")
+    fi
+  done
+
+# ── all mode ─────────────────────────────────────────────────────────────────
+
+else
+  FILES=()
+  while IFS= read -r line; do
+    local_file=$(echo "$line" | awk '{print $2}')
+    [[ -n "$local_file" ]] && FILES+=("$local_file")
+  done < <(git status --short)
+
+  if [[ ${#FILES[@]} -eq 0 ]]; then
+    echo "Working tree is clean. Nothing to commit."
+    exit 0
+  fi
+
+  echo "Dirty: ${#FILES[@]} file(s) → committing one by one…"
+
+  COMMITTED=0 SKIPPED=()
+  for FILE in "${FILES[@]}"; do
+    if is_secret "$FILE" || [[ ! -e "$FILE" ]]; then
+      is_secret "$FILE" && echo "  ⚠ skip (secret): $FILE"
+      SKIPPED+=("$FILE")
+      continue
+    fi
+
+    local_status=$(git status --short -- "$FILE" | awk '{print $1}')
+    local_diff=""
+    if [[ "$local_status" == "??" ]]; then
+      local_diff=$(git diff --no-index /dev/null "$FILE" 2>/dev/null || true)
+    else
+      local_diff=$(git diff -- "$FILE")
+    fi
+    [[ -z "$local_diff" ]] && continue
+
+    git add -- "$FILE"
+    if commit_file "$FILE"; then
+      COMMITTED=$((COMMITTED + 1))
+    else
+      git reset HEAD -- "$FILE" > /dev/null 2>&1 || true
+      SKIPPED+=("$FILE")
+    fi
+  done
+fi
+
+# ── summary ──────────────────────────────────────────────────────────────────
+
+echo ""
+echo "Committed: $COMMITTED file(s)."
+if [[ ${#SKIPPED[@]} -gt 0 ]]; then
+  echo "Skipped (${#SKIPPED[@]}):"
+  for f in "${SKIPPED[@]}"; do echo "  - $f"; done
+fi
