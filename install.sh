@@ -7,7 +7,7 @@
 set -euo pipefail
 
 VERSION=$(curl -fsSL https://api.github.com/repos/Navibyte-Innovations-Pvt-Ltd/gai-tools/releases/latest \
-  | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])" 2>/dev/null || echo "dev")
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'].lstrip('v'))" 2>/dev/null || echo "dev")
 INSTALL_DIR="$HOME/.local/bin"
 ZSHRC="$HOME/.zshrc"
 MODEL="${GAI_MODEL:-qwen2.5-coder:1.5b}"

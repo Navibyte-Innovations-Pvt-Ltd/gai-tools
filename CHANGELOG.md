@@ -7,6 +7,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) — [Semantic V
 ---
 
 ## [Unreleased]
+### Fixed
+
+- fix(install): strip leading v from tag_name to avoid double-v in banner
+
 ### Changed
 
 - docs: update contributing guide, usage, and README
