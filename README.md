@@ -2,6 +2,7 @@
 
 > AI-powered git auto-commit for macOS — stage files, they commit themselves.
 
+[![Lint](https://github.com/Navibyte-Innovations-Pvt-Ltd/gai-tools/actions/workflows/lint.yml/badge.svg)](https://github.com/Navibyte-Innovations-Pvt-Ltd/gai-tools/actions/workflows/lint.yml)
 [![Release](https://img.shields.io/github/v/release/Navibyte-Innovations-Pvt-Ltd/gai-tools?include_prereleases)](https://github.com/Navibyte-Innovations-Pvt-Ltd/gai-tools/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey)
@@ -29,6 +30,14 @@ Committed: 1 file(s).
 
 ## Install
 
+**Quick install (latest release):**
+```bash
+curl -L https://github.com/Navibyte-Innovations-Pvt-Ltd/gai-tools/releases/latest/download/gai-tools-latest.tar.gz | tar -xz
+bash install.sh
+source ~/.zshrc
+```
+
+**From source:**
 ```bash
 git clone https://github.com/Navibyte-Innovations-Pvt-Ltd/gai-tools
 cd gai-tools
@@ -36,20 +45,11 @@ bash install.sh
 source ~/.zshrc
 ```
 
-The installer handles everything: Homebrew dependencies, Ollama, model download, script install, and shell hook.
+The installer handles everything: Homebrew check, `fswatch`, `ollama`, model download (~986MB one-time), script install, and shell hook.
 
 ---
 
 ## Usage
-
-### Automatic (normal workflow)
-
-1. Open any terminal inside a git repo
-2. `gai-watch` starts in background automatically
-3. Stage files with VS Code or `git add`
-4. Commits happen — one per file, AI message
-
-### Manual commands
 
 | Command | Description |
 |---------|-------------|
@@ -64,10 +64,9 @@ The installer handles everything: Homebrew dependencies, Ollama, model download,
 
 ```bash
 export GAI_MODEL=qwen2.5-coder:7b   # use a larger model
-gai
 ```
 
-Default model: `qwen2.5-coder:1.5b` (~200ms on Apple Silicon, 986MB)
+Default: `qwen2.5-coder:1.5b` (~200ms on Apple Silicon)
 
 ---
 
@@ -76,7 +75,7 @@ Default model: `qwen2.5-coder:1.5b` (~200ms on Apple Silicon, 986MB)
 ```
 Shell opens in a git repo
       ↓
-~/.zshrc hook starts gai-watch in background (one per repo globally)
+~/.zshrc hook starts gai-watch in background (one per repo globally via PID file)
       ↓
 You stage files (VS Code or git add)
       ↓
@@ -98,8 +97,6 @@ git commit -m "type(scope): description"
 - bash 3.2+ (macOS default)
 - zsh shell
 
-The installer handles: `fswatch`, `ollama`, `qwen2.5-coder:1.5b`
-
 ---
 
 ## Uninstall
@@ -109,8 +106,6 @@ cd gai-tools
 bash uninstall.sh
 ```
 
-Removes scripts, stops watchers, removes shell hook. Ollama and fswatch are left intact.
-
 ---
 
 ## Troubleshooting
@@ -118,7 +113,6 @@ Removes scripts, stops watchers, removes shell hook. Ollama and fswatch are left
 See [docs/troubleshooting.md](docs/troubleshooting.md).
 
 **Quick checks:**
-
 ```bash
 cat /tmp/gai-watch.log   # watcher log
 gai --dry-run            # test manually
@@ -126,6 +120,14 @@ ollama serve             # if Ollama not running
 ```
 
 ---
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Security
+
+See [SECURITY.md](SECURITY.md).
 
 ## Changelog
 

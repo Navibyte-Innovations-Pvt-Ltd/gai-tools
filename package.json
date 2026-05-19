@@ -1,0 +1,33 @@
+{
+  "name": "@navibyte-innovations-pvt-ltd/gai-tools",
+  "version": "1.0.0",
+  "description": "AI-powered git auto-commit for macOS — stage files, they commit themselves using local Ollama",
+  "keywords": ["macos", "git", "ai", "ollama", "commit", "cli", "bash", "automation"],
+  "homepage": "https://github.com/Navibyte-Innovations-Pvt-Ltd/gai-tools",
+  "bugs": "https://github.com/Navibyte-Innovations-Pvt-Ltd/gai-tools/issues",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Navibyte-Innovations-Pvt-Ltd/gai-tools.git"
+  },
+  "license": "MIT",
+  "scripts": {
+    "postinstall": "echo '\\ngai-tools downloaded. Run: bash install.sh && source ~/.zshrc\\n'"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "files": [
+    "gai",
+    "gai-watch",
+    "install.sh",
+    "uninstall.sh",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "docs/"
+  ],
+  "engines": {
+    "node": ">=14"
+  },
+  "os": ["darwin"]
+}

@@ -2,7 +2,11 @@
 
 All notable changes to gai-tools are documented here.
 
-Format: [Semantic Versioning](https://semver.org) — `MAJOR.MINOR.PATCH`
+Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) — [Semantic Versioning](https://semver.org)
+
+---
+
+## [Unreleased]
 
 ---
 
@@ -20,4 +24,5 @@ Format: [Semantic Versioning](https://semver.org) — `MAJOR.MINOR.PATCH`
 - Secret file detection: skips `*.env*`, `*credentials*`, `*secret*`, `*.key`, `id_rsa`, `id_ed25519`
 - `GAI_MODEL` env var to switch Ollama models
 
+[Unreleased]: https://github.com/Navibyte-Innovations-Pvt-Ltd/gai-tools/compare/v1.0.0...HEAD
 [1.0.0]: https://github.com/Navibyte-Innovations-Pvt-Ltd/gai-tools/releases/tag/v1.0.0

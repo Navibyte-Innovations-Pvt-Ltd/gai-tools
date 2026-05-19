@@ -1,0 +1,98 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+        env:
+          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+      - name: Bump patch version
+        id: version
+        run: |
+          LATEST=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          MAJOR=$(echo "$LATEST" | cut -d. -f1 | tr -d 'v')
+          MINOR=$(echo "$LATEST" | cut -d. -f2)
+          PATCH=$(echo "$LATEST" | cut -d. -f3)
+          VERSION="v${MAJOR}.${MINOR}.$((PATCH + 1))"
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "SEMVER=${VERSION#v}" >> "$GITHUB_OUTPUT"
+          echo "Auto version: $VERSION (previous: $LATEST)"
+
+      - name: Extract [Unreleased] changelog
+        id: changelog
+        run: |
+          NOTES=$(awk '/^## \[Unreleased\]/{flag=1; next} /^## \[/{flag=0} flag' CHANGELOG.md | sed '/^[[:space:]]*$/d')
+          if [ -z "$NOTES" ]; then
+            NOTES="Maintenance release."
+          fi
+          echo "NOTES<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$NOTES" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Build tarball
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          ARCHIVE="gai-tools-${VERSION}.tar.gz"
+          tar -czf "$ARCHIVE" gai gai-watch install.sh uninstall.sh README.md LICENSE CHANGELOG.md docs/
+          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.VERSION }}
+          name: "gai-tools ${{ steps.version.outputs.VERSION }}"
+          body: |
+            ## Changes
+            ${{ steps.changelog.outputs.NOTES }}
+
+            ---
+
+            ## Install
+
+            ```bash
+            curl -L https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/gai-tools-${{ steps.version.outputs.VERSION }}.tar.gz | tar -xz
+            bash install.sh
+            source ~/.zshrc
+            ```
+
+            ## Usage
+            ```bash
+            gai              # commit staged files
+            gai --all        # commit all dirty files
+            gai --dry-run    # preview without committing
+            gai-watch        # start watcher manually
+            ```
+          files: ${{ env.ARCHIVE }}
+
+      - name: Set up Node.js for npm publish
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@navibyte-innovations-pvt-ltd'
+
+      - name: Publish to GitHub Packages (npm)
+        run: |
+          SEMVER="${{ steps.version.outputs.SEMVER }}"
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            pkg.version = '${SEMVER}';
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));
+          "
+          npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
