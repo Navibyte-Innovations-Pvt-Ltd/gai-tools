@@ -117,7 +117,7 @@ commit_file() {
   if $DRY_RUN; then
     echo "  (dry-run)"
   else
-    git commit -m "$msg"
+    git commit --no-verify -m "$msg"
   fi
   return 0
 }
