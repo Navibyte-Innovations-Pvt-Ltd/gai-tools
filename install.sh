@@ -13,6 +13,7 @@ ZSHRC="$HOME/.zshrc"
 MODEL="${GAI_MODEL:-qwen2.5-coder:1.5b}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# shellcheck disable=SC2016
 GAI_WATCH_HOOK='
 # gai-tools: auto-start gai-watch when entering a git repo
 _gai_pidfile() {
@@ -118,6 +119,7 @@ chmod +x "$INSTALL_DIR/gai-watch"
 
 if ! grep -q 'HOME/.local/bin' "$ZSHRC" 2>/dev/null; then
   echo "" >> "$ZSHRC"
+  # shellcheck disable=SC2016
   echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$ZSHRC"
   echo "✓ Added ~/.local/bin to PATH in $ZSHRC"
 fi
