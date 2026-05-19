@@ -20,10 +20,10 @@ for arg in "$@"; do
     update)
       echo "→ Updating gai-tools from GitHub…"
       TMP=$(mktemp -d)
-      curl -fsSL https://github.com/Navibyte-Innovations-Pvt-Ltd/gai-tools/releases/latest/download/$(
-        curl -fsSL https://api.github.com/repos/Navibyte-Innovations-Pvt-Ltd/gai-tools/releases/latest \
-          | python3 -c "import sys,json; assets=json.load(sys.stdin)['assets']; print(next(a['name'] for a in assets if a['name'].endswith('.tar.gz')))"
-      ) | tar -xz -C "$TMP"
+      TARBALL=$(curl -fsSL https://api.github.com/repos/Navibyte-Innovations-Pvt-Ltd/gai-tools/releases/latest \
+        | python3 -c "import sys,json; assets=json.load(sys.stdin)['assets']; print(next(a['name'] for a in assets if a['name'].endswith('.tar.gz')))")
+      curl -fsSL "https://github.com/Navibyte-Innovations-Pvt-Ltd/gai-tools/releases/latest/download/${TARBALL}" \
+        | tar -xz -C "$TMP"
       bash "$TMP/install.sh"
       rm -rf "$TMP"
       echo "✓ gai-tools updated"

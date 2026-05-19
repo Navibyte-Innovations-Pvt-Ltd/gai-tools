@@ -7,6 +7,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) — [Semantic V
 ---
 
 ## [Unreleased]
+### Changed
+
+- docs: update contributing guide, usage, and README
+
 
 ---
 
