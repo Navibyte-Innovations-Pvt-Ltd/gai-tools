@@ -17,11 +17,24 @@ for arg in "$@"; do
   case "$arg" in
     --dry-run|-n) DRY_RUN=true ;;
     --all)        MODE="all" ;;
+    update)
+      echo "→ Updating gai-tools from GitHub…"
+      TMP=$(mktemp -d)
+      curl -fsSL https://github.com/Navibyte-Innovations-Pvt-Ltd/gai-tools/releases/latest/download/$(
+        curl -fsSL https://api.github.com/repos/Navibyte-Innovations-Pvt-Ltd/gai-tools/releases/latest \
+          | python3 -c "import sys,json; assets=json.load(sys.stdin)['assets']; print(next(a['name'] for a in assets if a['name'].endswith('.tar.gz')))"
+      ) | tar -xz -C "$TMP"
+      bash "$TMP/install.sh"
+      rm -rf "$TMP"
+      echo "✓ gai-tools updated"
+      exit 0
+      ;;
     --help|-h)
-      echo "Usage: gai [--all] [--dry-run]"
+      echo "Usage: gai [--all] [--dry-run] [update]"
       echo "  Default : commit staged files one by one (AI message per file)"
       echo "  --all   : commit all dirty files instead of staged"
       echo "  --dry-run: show messages without committing"
+      echo "  update  : pull latest version from GitHub"
       echo ""
       echo "Model: \$GAI_MODEL (default: $MODEL)"
       echo "Requires: ollama running + model pulled"
