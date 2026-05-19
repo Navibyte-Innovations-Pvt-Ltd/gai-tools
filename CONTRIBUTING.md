@@ -49,9 +49,11 @@ PR checklist:
 - [ ] Tested manually on macOS
 - [ ] `CHANGELOG.md` updated under `[Unreleased]`
 
-CI runs automatically:
-- **shellcheck** — lint all scripts
+CI runs automatically on every PR:
+- **shellcheck** — lint all scripts (must pass)
 - **changelog** — auto-updates `[Unreleased]` from commit messages if not already updated
+
+Both checks must pass before merge. Direct push to `main` is blocked.
 
 ### 5. After merge
 
@@ -60,6 +62,14 @@ GitHub Actions automatically:
 - Builds `gai-tools-vX.Y.Z.tar.gz`
 - Creates GitHub Release with tarball + changelog
 - Publishes to GitHub Packages (npm)
+
+### 6. Update installed version
+
+After a release, run on any machine that has gai installed:
+
+```bash
+gai update
+```
 
 ---
 

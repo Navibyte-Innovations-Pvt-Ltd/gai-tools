@@ -56,6 +56,7 @@ The installer handles everything: Homebrew check, `fswatch`, `ollama`, model dow
 | `gai` | Commit staged files one by one |
 | `gai --all` | Commit all dirty files |
 | `gai --dry-run` | Preview messages without committing |
+| `gai update` | Update to latest release from GitHub |
 | `gai-watch` | Start watcher manually |
 | `gai-watch --dry-run` | Watch + preview only |
 | `gai --help` | Show help |

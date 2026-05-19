@@ -13,6 +13,7 @@
 gai              # commit staged files one by one
 gai --all        # commit ALL dirty files (staged + unstaged)
 gai --dry-run    # preview messages without committing
+gai update       # update to latest release from GitHub
 gai-watch        # start watcher manually
 gai-watch --dry-run  # watch + preview only
 ```
