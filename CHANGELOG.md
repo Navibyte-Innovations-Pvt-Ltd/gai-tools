@@ -7,6 +7,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) — [Semantic V
 ---
 
 ## [Unreleased]
+### Added
+
+- feat(gai): update local Ollama with latest version
+
+### Fixed
+
+- fix(gai-watch): add logging and prune old logs
+
 ### Fixed
 
 - fix(install): strip leading v from tag_name to avoid double-v in banner
