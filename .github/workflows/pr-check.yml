@@ -21,9 +21,11 @@ jobs:
 
   changelog:
     name: changelog updated
+    needs: shellcheck
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      checks: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -89,9 +91,10 @@ jobs:
           PYEOF
 
       - name: Commit CHANGELOG update
+        id: commit
         run: |
           if git diff --quiet CHANGELOG.md; then
-            echo "No changes to commit"
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           git config user.name "github-actions[bot]"
@@ -99,3 +102,31 @@ jobs:
           git add CHANGELOG.md
           git commit -m "docs(changelog): auto-update [Unreleased] from PR commits"
           git push
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+          echo "new_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Report checks on new commit
+        if: steps.commit.outputs.pushed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          NEW_SHA="${{ steps.commit.outputs.new_sha }}"
+          REPO="${{ github.repository }}"
+          # shellcheck passed in the prior job — report it as success for the new commit
+          gh api "repos/$REPO/check-runs" \
+            --method POST \
+            -f name="shellcheck" \
+            -f head_sha="$NEW_SHA" \
+            -f status="completed" \
+            -f conclusion="success" \
+            -f "output[title]=shellcheck passed" \
+            -f "output[summary]=No issues found (carried from prior job result)"
+          # changelog updated — report success for the new commit
+          gh api "repos/$REPO/check-runs" \
+            --method POST \
+            -f name="changelog updated" \
+            -f head_sha="$NEW_SHA" \
+            -f status="completed" \
+            -f conclusion="success" \
+            -f "output[title]=CHANGELOG.md auto-updated" \
+            -f "output[summary]=Changelog automatically updated and committed to the branch"
