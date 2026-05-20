@@ -5,6 +5,13 @@
 
 set -euo pipefail
 
+LOG_DIR="${GAI_LOG_DIR:-$HOME/.gai/logs}"
+
+_prune_watch_logs() {
+  mkdir -p "$LOG_DIR"
+  find "$LOG_DIR" -name "*.watch.log" -mmin +1440 -delete 2>/dev/null || true
+}
+
 EXTRA_ARGS=()
 for arg in "$@"; do
   case "$arg" in
@@ -13,6 +20,7 @@ for arg in "$@"; do
       echo "Usage: gai-watch [--dry-run]"
       echo "  Watches .git/index and auto-runs gai when files are staged."
       echo "  Run once in a terminal tab. Stage files in VS Code → they commit."
+      echo "  Logs saved to \$GAI_LOG_DIR (default: ~/.gai/logs) for 24 h."
       exit 0
       ;;
   esac
@@ -27,6 +35,11 @@ GIT_DIR=$(git rev-parse --git-dir)
 INDEX="$GIT_DIR/index"
 REPO_ROOT=$(git rev-parse --show-toplevel)
 
+_prune_watch_logs
+LOG_FILE="$LOG_DIR/$(date +%Y-%m-%d).watch.log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+echo "── gai-watch $(date '+%Y-%m-%d %H:%M:%S') repo:$REPO_ROOT ──"
 echo "👁  gai-watch active → $REPO_ROOT"
 echo "   Stage files in VS Code to auto-commit. Ctrl+C to stop."
 echo ""
@@ -46,7 +59,7 @@ fswatch -o --latency "$DEBOUNCE" "$INDEX" | while read -r _; do
   fi
   LAST_RUN=$NOW
 
-  echo "━━━ staged: $(echo "$STAGED" | wc -l | tr -d ' ') file(s) ━━━"
+  echo "━━━ $(date '+%H:%M:%S') staged: $(echo "$STAGED" | wc -l | tr -d ' ') file(s) ━━━"
   (cd "$REPO_ROOT" && gai ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"})
   echo ""
 done
