@@ -195,7 +195,25 @@ while IFS= read -r pidfile; do
 done < <(find /tmp -maxdepth 1 -name 'gai-watch-*.pid' 2>/dev/null)
 
 if [[ $RESTARTED -eq 0 ]]; then
-  echo "  (no active watchers — they start automatically when you open a repo)"
+  echo "  (no prior watchers found)"
+fi
+
+# Also start watcher in the current directory if it is a git repo
+if git rev-parse --git-dir > /dev/null 2>&1; then
+  CURR_REPO=$(git rev-parse --show-toplevel)
+  CURR_HASH=$(echo "$CURR_REPO" | md5)
+  CURR_PID="/tmp/gai-watch-${CURR_HASH}.pid"
+  CURR_RUNNING=false
+  if [[ -f "$CURR_PID" ]]; then
+    CURR_OLD=$(awk '{print $1}' "$CURR_PID" 2>/dev/null)
+    kill -0 "$CURR_OLD" 2>/dev/null && CURR_RUNNING=true
+  fi
+  if [[ "$CURR_RUNNING" == "false" ]]; then
+    (cd "$CURR_REPO" && gai-watch > "/tmp/gai-watch-${CURR_HASH}.log" 2>&1 &
+    disown $! 2>/dev/null || true
+    echo "$! $CURR_REPO" > "$CURR_PID")
+    echo "  ✓ started watcher in current repo: $(basename "$CURR_REPO")"
+  fi
 fi
 
 # ── done ─────────────────────────────────────────────────────────────────────
@@ -203,10 +221,9 @@ fi
 echo ""
 echo "━━━ gai-tools v$VERSION installed ━━━"
 echo ""
-echo "  Reload your shell:"
-echo "    source ~/.zshrc"
+echo "  Stage any file in a git repo — it will auto-commit."
 echo ""
-echo "  Then stage any file in a git repo — it will auto-commit."
+echo "  (First install only: open a new terminal or run 'source ~/.zshrc')"
 echo ""
 echo "  Commands:"
 echo "    gai              # commit staged files"
