@@ -31,16 +31,72 @@ jobs:
           echo "SEMVER=${VERSION#v}" >> "$GITHUB_OUTPUT"
           echo "Auto version: $VERSION (previous: $LATEST)"
 
-      - name: Extract [Unreleased] changelog
+      - name: Generate and write changelog
         id: changelog
         run: |
-          NOTES=$(awk '/^## \[Unreleased\]/{flag=1; next} /^## \[/{flag=0} flag' CHANGELOG.md | sed '/^[[:space:]]*$/d')
-          if [ -z "$NOTES" ]; then
-            NOTES="Maintenance release."
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          DATE=$(date +%Y-%m-%d)
+          PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+
+          if [ -n "$PREV_TAG" ]; then
+            COMMITS=$(git log "${PREV_TAG}..HEAD" --pretty=format:"- %s" \
+              | grep -v '^- Merge ' \
+              | grep -v '^- docs(changelog)')
+          else
+            COMMITS=$(git log --pretty=format:"- %s" \
+              | grep -v '^- Merge ')
           fi
+
+          ADDED="" FIXED="" CHANGED=""
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            msg="${line#- }"
+            case "$msg" in
+              fix*|Fix*)   FIXED="${FIXED}\n${line}" ;;
+              feat*|Feat*) ADDED="${ADDED}\n${line}" ;;
+              *)           CHANGED="${CHANGED}\n${line}" ;;
+            esac
+          done <<< "$COMMITS"
+
+          BLOCK=""
+          [ -n "$ADDED" ]   && BLOCK="${BLOCK}\n### Added\n$(printf '%b' "$ADDED")\n"
+          [ -n "$FIXED" ]   && BLOCK="${BLOCK}\n### Fixed\n$(printf '%b' "$FIXED")\n"
+          [ -n "$CHANGED" ] && BLOCK="${BLOCK}\n### Changed\n$(printf '%b' "$CHANGED")\n"
+
+          if [ -z "$BLOCK" ]; then
+            BLOCK="\nMaintenance release.\n"
+          fi
+
+          python3 - <<PYEOF
+          import re
+          with open("CHANGELOG.md") as f:
+              content = f.read()
+          block = """$BLOCK"""
+          version_header = "## [$VERSION] - $DATE\n"
+          versioned = version_header + block.lstrip("\n") + "\n"
+          updated = re.sub(
+              r'(## \[Unreleased\]\n)',
+              r'\1\n' + versioned,
+              content,
+              count=1
+          )
+          with open("CHANGELOG.md", "w") as f:
+              f.write(updated)
+          print("CHANGELOG.md updated for $VERSION")
+          PYEOF
+
+          NOTES=$(printf '%b' "$BLOCK")
           echo "NOTES<<EOF" >> "$GITHUB_OUTPUT"
           echo "$NOTES" >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Commit changelog to main
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add CHANGELOG.md
+          git commit -m "docs(changelog): release ${{ steps.version.outputs.VERSION }}" || echo "nothing to commit"
+          git push || echo "nothing to push"
 
       - name: Build tarball
         run: |
