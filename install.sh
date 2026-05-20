@@ -28,12 +28,14 @@ _gai_watch_start() {
   pidfile=$(_gai_pidfile "$repo")
   if [[ -f "$pidfile" ]]; then
     local pid
-    pid=$(cat "$pidfile")
+    pid=$(awk '"'"'{print $1}'"'"' "$pidfile" 2>/dev/null)
     kill -0 "$pid" 2>/dev/null && return
     rm -f "$pidfile"
   fi
-  gai-watch > /tmp/gai-watch.log 2>&1 &
-  echo $! > "$pidfile"
+  local repo_hash
+  repo_hash=$(echo "$repo" | md5)
+  gai-watch > "/tmp/gai-watch-${repo_hash}.log" 2>&1 &
+  echo "$! $repo" > "$pidfile"
 }
 
 chpwd() {
@@ -124,14 +126,76 @@ if ! grep -q 'HOME/.local/bin' "$ZSHRC" 2>/dev/null; then
   echo "✓ Added ~/.local/bin to PATH in $ZSHRC"
 fi
 
-# ── add zshrc hook (idempotent) ───────────────────────────────────────────────
+# ── add/update zshrc hook (idempotent, upgrades old format) ──────────────────
 
 if grep -q "gai-tools:" "$ZSHRC" 2>/dev/null; then
-  echo "✓ zshrc hook already installed"
+  # Update hook if it uses old pidfile format (single PID, no repo path stored)
+  # shellcheck disable=SC2016
+  if grep -q 'echo $! > "$pidfile"' "$ZSHRC" 2>/dev/null; then
+    echo "→ Updating zshrc hook to new format…"
+    python3 - <<PYEOF
+import re, sys
+with open("$ZSHRC") as f:
+    content = f.read()
+updated = re.sub(
+    r'\n# gai-tools:.*?# end gai-tools\n?',
+    '',
+    content,
+    flags=re.DOTALL
+)
+with open("$ZSHRC", "w") as f:
+    f.write(updated)
+PYEOF
+    echo "" >> "$ZSHRC"
+    echo "$GAI_WATCH_HOOK" >> "$ZSHRC"
+    echo "✓ Updated zshrc hook"
+  else
+    echo "✓ zshrc hook already up to date"
+  fi
 else
   echo "" >> "$ZSHRC"
   echo "$GAI_WATCH_HOOK" >> "$ZSHRC"
   echo "✓ Added auto-start hook to $ZSHRC"
+fi
+
+# ── restart all running gai-watch instances ───────────────────────────────────
+
+echo "→ Restarting gai-watch instances…"
+RESTARTED=0
+
+while IFS= read -r pidfile; do
+  [[ -f "$pidfile" ]] || continue
+
+  old_pid=$(awk '{print $1}' "$pidfile" 2>/dev/null)
+  [[ -n "$old_pid" ]] || continue
+
+  # New pidfile format stores "PID /repo/path"; old format stores just PID.
+  # Fall back to lsof to find the repo from the live process.
+  repo=$(awk 'NF>1{print $2}' "$pidfile" 2>/dev/null)
+  if [[ -z "$repo" ]]; then
+    repo=$(lsof -p "$old_pid" 2>/dev/null | awk '$4=="cwd"{print $9}' | head -1)
+  fi
+
+  kill "$old_pid" 2>/dev/null || true
+  rm -f "$pidfile"
+
+  [[ -n "$repo" && -d "$repo/.git" ]] || continue
+
+  repo_hash=$(echo "$repo" | md5)
+  (
+    cd "$repo" || exit
+    gai-watch > "/tmp/gai-watch-${repo_hash}.log" 2>&1 &
+    new_pid=$!
+    disown "$new_pid" 2>/dev/null || true
+    echo "$new_pid $repo" > "$pidfile"
+  )
+  RESTARTED=$((RESTARTED + 1))
+  echo "  ✓ $(basename "$repo")"
+
+done < <(find /tmp -maxdepth 1 -name 'gai-watch-*.pid' 2>/dev/null)
+
+if [[ $RESTARTED -eq 0 ]]; then
+  echo "  (no active watchers — they start automatically when you open a repo)"
 fi
 
 # ── done ─────────────────────────────────────────────────────────────────────
@@ -148,6 +212,7 @@ echo "  Commands:"
 echo "    gai              # commit staged files"
 echo "    gai --all        # commit all dirty files"
 echo "    gai --dry-run    # preview without committing"
+echo "    gai --logs       # view last 24 h of activity"
 echo "    gai-watch        # start watcher manually"
 echo ""
 echo "  Docs: https://github.com/Navibyte-Innovations-Pvt-Ltd/gai-tools"
