@@ -216,6 +216,50 @@ if git rev-parse --git-dir > /dev/null 2>&1; then
   fi
 fi
 
+# ── start watchers in all open VS Code workspaces ────────────────────────────
+
+VSCODE_STORAGE="$HOME/Library/Application Support/Code/User/globalStorage/storage.json"
+if [[ -f "$VSCODE_STORAGE" ]]; then
+  echo "→ Starting watchers for open VS Code workspaces…"
+  VS_STARTED=0
+  while IFS= read -r repo; do
+    [[ -n "$repo" && -d "$repo/.git" ]] || continue
+    repo_hash=$(echo "$repo" | md5)
+    pidfile="/tmp/gai-watch-${repo_hash}.pid"
+    if [[ -f "$pidfile" ]]; then
+      pid=$(awk '{print $1}' "$pidfile" 2>/dev/null)
+      kill -0 "$pid" 2>/dev/null && continue
+      rm -f "$pidfile"
+    fi
+    (
+      cd "$repo" || exit
+      gai-watch > "/tmp/gai-watch-${repo_hash}.log" 2>&1 &
+      new_pid=$!
+      disown "$new_pid" 2>/dev/null || true
+      echo "$new_pid $repo" > "$pidfile"
+    )
+    VS_STARTED=$((VS_STARTED + 1))
+    echo "  ✓ $(basename "$repo")"
+  done < <(python3 - <<'PYEOF'
+import json, os, sys
+path = os.path.expanduser(
+    "~/Library/Application Support/Code/User/globalStorage/storage.json"
+)
+try:
+    with open(path) as f:
+        d = json.load(f)
+    folders = d.get("backupWorkspaces", {}).get("folders", [])
+    for item in folders:
+        uri = item.get("folderUri", "")
+        if uri.startswith("file://"):
+            print(uri[7:])
+except Exception:
+    pass
+PYEOF
+)
+  [[ $VS_STARTED -gt 0 ]] || echo "  (no new workspaces to watch)"
+fi
+
 # ── done ─────────────────────────────────────────────────────────────────────
 
 echo ""
