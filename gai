@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # gai — AI git commit using local Ollama (qwen2.5-coder:1.5b)
-# Usage: gai [--all] [--dry-run]
+# Usage: gai [--all] [--dry-run] [--logs]
 #
 #   Default (no flags): commit STAGED files one by one
 #   --all              : commit ALL dirty files one by one
 #   --dry-run          : print messages, don't commit
+#   --logs             : show last 24 h of activity
 
 set -euo pipefail
 
@@ -12,11 +13,30 @@ MODEL="${GAI_MODEL:-qwen2.5-coder:1.5b}"
 OLLAMA_URL="http://localhost:11434/api/generate"
 DRY_RUN=false
 MODE="staged"
+LOG_DIR="${GAI_LOG_DIR:-$HOME/.gai/logs}"
+
+_prune_logs() {
+  mkdir -p "$LOG_DIR"
+  find "$LOG_DIR" -name "*.log" -mmin +1440 -delete 2>/dev/null || true
+}
 
 for arg in "$@"; do
   case "$arg" in
     --dry-run|-n) DRY_RUN=true ;;
     --all)        MODE="all" ;;
+    --logs)
+      _prune_logs
+      _lf=()
+      while IFS= read -r f; do
+        [[ -n "$f" ]] && _lf+=("$f")
+      done < <(find "$LOG_DIR" -name "*.log" -mmin -1440 2>/dev/null | sort)
+      if [[ ${#_lf[@]} -eq 0 ]]; then
+        echo "No gai activity in the last 24 h."
+      else
+        cat "${_lf[@]}"
+      fi
+      exit 0
+      ;;
     update)
       echo "→ Updating gai-tools from GitHub…"
       TMP=$(mktemp -d)
@@ -30,10 +50,11 @@ for arg in "$@"; do
       exit 0
       ;;
     --help|-h)
-      echo "Usage: gai [--all] [--dry-run] [update]"
+      echo "Usage: gai [--all] [--dry-run] [--logs] [update]"
       echo "  Default : commit staged files one by one (AI message per file)"
       echo "  --all   : commit all dirty files instead of staged"
       echo "  --dry-run: show messages without committing"
+      echo "  --logs  : show last 24 h of activity (\$GAI_LOG_DIR)"
       echo "  update  : pull latest version from GitHub"
       echo ""
       echo "Model: \$GAI_MODEL (default: $MODEL)"
@@ -43,6 +64,13 @@ for arg in "$@"; do
       ;;
   esac
 done
+
+# ── logging setup ────────────────────────────────────────────────────────────
+
+_prune_logs
+LOG_FILE="$LOG_DIR/$(date +%Y-%m-%d).log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+echo "── gai $(date '+%Y-%m-%d %H:%M:%S') ──────────────────────────────────────────"
 
 # ── sanity checks ────────────────────────────────────────────────────────────
 
@@ -89,11 +117,14 @@ $diff"
 
   python3 -c "
 import sys, json
-d = json.load(sys.stdin)
-msg = d.get('response', '').strip()
-lines = [l.strip() for l in msg.splitlines() if l.strip()]
-print(lines[0] if lines else '')
-" <<< "$response"
+try:
+  d = json.load(sys.stdin)
+  msg = d.get('response', '').strip()
+  lines = [l.strip() for l in msg.splitlines() if l.strip()]
+  print(lines[0] if lines else '')
+except Exception:
+  pass
+" <<< "$response" || true
 }
 
 commit_file() {
@@ -150,7 +181,7 @@ if [[ "$MODE" == "staged" ]]; then
 
   echo "Staged: ${#FILES[@]} file(s) → committing one by one…"
 
-  git reset HEAD > /dev/null 2>&1
+  git reset 2>/dev/null || git rm --cached -r . 2>/dev/null || true
 
   COMMITTED=0 SKIPPED=()
   for FILE in "${FILES[@]}"; do
