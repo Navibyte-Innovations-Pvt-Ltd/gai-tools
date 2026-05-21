@@ -9,6 +9,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) — [Semantic V
 ## [Unreleased]
 ### Added
 
+- feat(gai): add `gai pr` subcommand — branch guard + Ollama-generated title/body + `gh pr create`
 - feat(gai): update local Ollama with latest version
 
 ### Fixed
