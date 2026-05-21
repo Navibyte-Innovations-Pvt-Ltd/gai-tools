@@ -97,9 +97,10 @@ if [[ "${_gai_pr:-false}" == "true" ]]; then
     exit 1
   fi
 
-  PR_COMMITS=$(git log "$BASE_BRANCH"..HEAD --oneline 2>/dev/null)
+  git fetch origin "$BASE_BRANCH" --quiet 2>/dev/null || true
+  PR_COMMITS=$(git log "origin/$BASE_BRANCH"..HEAD --oneline 2>/dev/null)
   if [[ -z "$PR_COMMITS" ]]; then
-    echo "error: no commits ahead of '$BASE_BRANCH' — nothing to PR." >&2
+    echo "error: no commits ahead of 'origin/$BASE_BRANCH' — nothing to PR." >&2
     exit 1
   fi
 
@@ -110,7 +111,7 @@ if [[ "${_gai_pr:-false}" == "true" ]]; then
     exit 1
   fi
 
-  PR_DIFF_STAT=$(git diff "$BASE_BRANCH"...HEAD --stat 2>/dev/null)
+  PR_DIFF_STAT=$(git diff "origin/$BASE_BRANCH"...HEAD --stat 2>/dev/null)
 
   _pr_title_prompt="Generate a GitHub pull request title for these commits.
 Reply with ONLY the title on one line. No explanation. No backticks. No quotes.
