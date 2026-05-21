@@ -49,13 +49,17 @@ for arg in "$@"; do
       echo "✓ gai-tools updated"
       exit 0
       ;;
+    pr)
+      _gai_pr=true
+      ;;
     --help|-h)
-      echo "Usage: gai [--all] [--dry-run] [--logs] [update]"
+      echo "Usage: gai [--all] [--dry-run] [--logs] [update] [pr]"
       echo "  Default : commit staged files one by one (AI message per file)"
       echo "  --all   : commit all dirty files instead of staged"
       echo "  --dry-run: show messages without committing"
       echo "  --logs  : show last 24 h of activity (\$GAI_LOG_DIR)"
       echo "  update  : pull latest version from GitHub"
+      echo "  pr      : create a GitHub PR from current branch (requires gh CLI)"
       echo ""
       echo "Model: \$GAI_MODEL (default: $MODEL)"
       echo "Requires: ollama running + model pulled"
@@ -64,6 +68,139 @@ for arg in "$@"; do
       ;;
   esac
 done
+
+# ── pr subcommand ─────────────────────────────────────────────────────────────
+
+if [[ "${_gai_pr:-false}" == "true" ]]; then
+  if ! git rev-parse --git-dir > /dev/null 2>&1; then
+    echo "error: not inside a git repository" >&2
+    exit 1
+  fi
+
+  if ! command -v gh > /dev/null 2>&1; then
+    echo "error: gh CLI not installed." >&2
+    echo "  Install: brew install gh && gh auth login" >&2
+    exit 1
+  fi
+
+  if ! gh auth status > /dev/null 2>&1; then
+    echo "error: gh CLI not authenticated." >&2
+    echo "  Run: gh auth login" >&2
+    exit 1
+  fi
+
+  CURRENT_BRANCH=$(git branch --show-current)
+  BASE_BRANCH=$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null || echo "main")
+
+  if [[ "$CURRENT_BRANCH" == "$BASE_BRANCH" || "$CURRENT_BRANCH" == "main" || "$CURRENT_BRANCH" == "master" ]]; then
+    echo "error: on branch '$CURRENT_BRANCH' — switch to a feature branch first." >&2
+    exit 1
+  fi
+
+  PR_COMMITS=$(git log "$BASE_BRANCH"..HEAD --oneline 2>/dev/null)
+  if [[ -z "$PR_COMMITS" ]]; then
+    echo "error: no commits ahead of '$BASE_BRANCH' — nothing to PR." >&2
+    exit 1
+  fi
+
+  if ! curl -s --connect-timeout 2 "http://localhost:11434" > /dev/null 2>&1; then
+    echo "error: Ollama not running." >&2
+    echo "  Start:   ollama serve" >&2
+    echo "  Install: brew install ollama && ollama pull $MODEL" >&2
+    exit 1
+  fi
+
+  PR_DIFF_STAT=$(git diff "$BASE_BRANCH"...HEAD --stat 2>/dev/null)
+
+  _pr_title_prompt="Generate a GitHub pull request title for these commits.
+Reply with ONLY the title on one line. No explanation. No backticks. No quotes.
+Format: type(scope): short description (conventional commit style, max 70 chars)
+Types: feat fix refactor style docs test chore perf
+
+Branch: $CURRENT_BRANCH
+Commits:
+$PR_COMMITS"
+
+  _pr_body_prompt="Generate a GitHub pull request body in markdown for these commits.
+Use this exact structure:
+## Summary
+- bullet 1
+- bullet 2
+
+## Changes
+$PR_DIFF_STAT
+
+## Test plan
+- [ ] test step 1
+- [ ] test step 2
+
+Keep it concise. Reply with ONLY the markdown body.
+
+Branch: $CURRENT_BRANCH
+Commits:
+$PR_COMMITS"
+
+  echo "→ Generating PR title…"
+  _title_escaped=$(python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" <<< "$_pr_title_prompt")
+  PR_TITLE=$(curl -s --connect-timeout 10 "$OLLAMA_URL" \
+    -H "Content-Type: application/json" \
+    -d "{\"model\":\"$MODEL\",\"prompt\":$_title_escaped,\"stream\":false}" \
+    | python3 -c "
+import sys, json
+try:
+  d = json.load(sys.stdin)
+  msg = d.get('response', '').strip()
+  lines = [l.strip() for l in msg.splitlines() if l.strip()]
+  print(lines[0] if lines else '')
+except Exception:
+  pass
+" || true)
+
+  if [[ -z "$PR_TITLE" ]]; then
+    PR_TITLE="feat(${CURRENT_BRANCH}): changes from branch"
+  fi
+
+  echo "→ Generating PR body…"
+  _body_escaped=$(python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" <<< "$_pr_body_prompt")
+  PR_BODY=$(curl -s --connect-timeout 10 "$OLLAMA_URL" \
+    -H "Content-Type: application/json" \
+    -d "{\"model\":\"$MODEL\",\"prompt\":$_body_escaped,\"stream\":false}" \
+    | python3 -c "
+import sys, json
+try:
+  d = json.load(sys.stdin)
+  print(d.get('response', '').strip())
+except Exception:
+  pass
+" || true)
+
+  if [[ -z "$PR_BODY" ]]; then
+    _pr_bullets=""
+    while IFS= read -r _line; do
+      _pr_bullets+="- ${_line}"$'\n'
+    done <<< "$PR_COMMITS"
+    PR_BODY="## Summary
+${_pr_bullets}
+## Changes
+$PR_DIFF_STAT"
+  fi
+
+  echo "→ Pushing branch '$CURRENT_BRANCH'…"
+  git push -u origin "$CURRENT_BRANCH"
+
+  echo "→ Creating PR…"
+  PR_URL=$(gh pr create \
+    --base "$BASE_BRANCH" \
+    --assignee @me \
+    --title "$PR_TITLE" \
+    --body "$PR_BODY")
+
+  echo ""
+  echo "✓ PR created: $PR_URL"
+  echo "  Branch: $CURRENT_BRANCH → $BASE_BRANCH"
+  echo "  Title:  $PR_TITLE"
+  exit 0
+fi
 
 # ── logging setup ────────────────────────────────────────────────────────────
 
