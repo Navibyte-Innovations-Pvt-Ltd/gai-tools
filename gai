@@ -175,9 +175,12 @@ except Exception:
 " || true)
 
   if [[ -z "$PR_BODY" ]]; then
+    _pr_bullets=""
+    while IFS= read -r _line; do
+      _pr_bullets+="- ${_line}"$'\n'
+    done <<< "$PR_COMMITS"
     PR_BODY="## Summary
-$(echo "$PR_COMMITS" | sed 's/^/- /')
-
+${_pr_bullets}
 ## Changes
 $PR_DIFF_STAT"
   fi
