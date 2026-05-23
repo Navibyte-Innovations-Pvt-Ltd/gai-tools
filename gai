@@ -243,6 +243,50 @@ _ensure_watch() {
 
 _ensure_watch
 
+# ── per-repo lock (prevent concurrent gai runs racing on .git/index.lock) ─────
+# macOS has no flock; use an atomic mkdir mutex with stale-lock reclaim.
+
+GAI_LOCK_DIR=""
+
+_release_lock() {
+  [[ -n "$GAI_LOCK_DIR" ]] && rm -rf "$GAI_LOCK_DIR" 2>/dev/null || true
+}
+
+_acquire_lock() {
+  local repo repo_hash
+  repo=$(git rev-parse --show-toplevel 2>/dev/null) || return 0
+  repo_hash=$(echo "$repo" | md5)
+  GAI_LOCK_DIR="/tmp/gai-run-${repo_hash}.lock"
+
+  if mkdir "$GAI_LOCK_DIR" 2>/dev/null; then
+    echo $$ > "$GAI_LOCK_DIR/pid"
+    trap _release_lock EXIT INT TERM
+    return 0
+  fi
+
+  # Lock exists — reclaim only if the owning process is dead.
+  local owner
+  owner=$(cat "$GAI_LOCK_DIR/pid" 2>/dev/null || true)
+  if [[ -n "$owner" ]] && kill -0 "$owner" 2>/dev/null; then
+    echo "Another gai is already running for this repo (pid $owner) — skipping."
+    GAI_LOCK_DIR=""
+    exit 0
+  fi
+
+  rm -rf "$GAI_LOCK_DIR" 2>/dev/null || true
+  if mkdir "$GAI_LOCK_DIR" 2>/dev/null; then
+    echo $$ > "$GAI_LOCK_DIR/pid"
+    trap _release_lock EXIT INT TERM
+    return 0
+  fi
+
+  echo "Could not acquire gai lock for this repo — skipping."
+  GAI_LOCK_DIR=""
+  exit 0
+}
+
+_acquire_lock
+
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 is_secret() {
@@ -338,7 +382,14 @@ if [[ "$MODE" == "staged" ]]; then
 
   echo "Staged: ${#FILES[@]} file(s) → committing one by one…"
 
-  git reset 2>/dev/null || git rm --cached -r . 2>/dev/null || true
+  # Unstage everything, then re-add one file at a time below.
+  # NEVER fall back to anything that empties the index (e.g. git rm --cached -r .):
+  # on failure that turns the next per-file commit into a mass-deletion of history.
+  if ! git reset -q; then
+    echo "error: 'git reset' failed — .git/index.lock is held by another git process." >&2
+    echo "  Aborting to avoid rewriting history. Retry once the other process finishes." >&2
+    exit 1
+  fi
 
   COMMITTED=0 SKIPPED=()
   for FILE in "${FILES[@]}"; do
