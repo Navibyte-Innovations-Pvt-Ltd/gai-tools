@@ -249,7 +249,9 @@ _ensure_watch
 GAI_LOCK_DIR=""
 
 _release_lock() {
-  [[ -n "$GAI_LOCK_DIR" ]] && rm -rf "$GAI_LOCK_DIR" 2>/dev/null || true
+  if [[ -n "$GAI_LOCK_DIR" ]]; then
+    rm -rf "$GAI_LOCK_DIR" 2>/dev/null || true
+  fi
 }
 
 _acquire_lock() {
