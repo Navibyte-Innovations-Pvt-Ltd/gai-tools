@@ -157,7 +157,11 @@ try:
   d = json.load(sys.stdin)
   msg = d.get('response', '').strip()
   lines = [l.strip() for l in msg.splitlines() if l.strip()]
-  print(lines[0] if lines else '')
+  title = lines[0] if lines else ''
+  # Hard truncate at word boundary if model ignores the 72-char instruction.
+  if len(title) > 72:
+    title = title[:72].rsplit(' ', 1)[0].rstrip(',:;-')
+  print(title)
 except Exception:
   pass
 " || true)
