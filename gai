@@ -38,15 +38,54 @@ for arg in "$@"; do
       exit 0
       ;;
     update)
-      echo "→ Updating gai-tools from GitHub…"
+      _VERSION_FILE="$HOME/.local/bin/.gai-version"
+      _OLD_VERSION=$(cat "$_VERSION_FILE" 2>/dev/null || echo "unknown")
+
+      echo "→ Fetching latest gai-tools release…"
+      _RELEASE_JSON=$(curl -fsSL https://api.github.com/repos/Navibyte-Innovations-Pvt-Ltd/gai-tools/releases/latest)
+      _NEW_VERSION=$(python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])" <<< "$_RELEASE_JSON")
+      _TARBALL=$(python3 -c "import sys,json; assets=json.load(sys.stdin)['assets']; print(next(a['name'] for a in assets if a['name'].endswith('.tar.gz')))" <<< "$_RELEASE_JSON")
+
+      if [[ "$_OLD_VERSION" == "$_NEW_VERSION" ]]; then
+        echo "Already up to date ($_NEW_VERSION). Nothing to do."
+        exit 0
+      fi
+
+      echo "→ Updating $_OLD_VERSION → $_NEW_VERSION…"
+
+      # Snapshot running gai-watch dirs before killing so we can restart them.
+      _WATCH_DIRS=()
+      while IFS= read -r _pid; do
+        _dir=$(lsof -p "$_pid" 2>/dev/null | awk '$4=="cwd" {print $9; exit}')
+        [[ -n "$_dir" ]] && _WATCH_DIRS+=("$_dir")
+      done < <(pgrep -f 'bash.*gai-watch' 2>/dev/null || true)
+
+      if [[ ${#_WATCH_DIRS[@]} -gt 0 ]]; then
+        echo "→ Stopping ${#_WATCH_DIRS[@]} gai-watch instance(s)…"
+        pkill -f 'bash.*gai-watch' 2>/dev/null || true
+        pkill -f 'fswatch.*\.git/index' 2>/dev/null || true
+        sleep 1
+      fi
+
       TMP=$(mktemp -d)
-      TARBALL=$(curl -fsSL https://api.github.com/repos/Navibyte-Innovations-Pvt-Ltd/gai-tools/releases/latest \
-        | python3 -c "import sys,json; assets=json.load(sys.stdin)['assets']; print(next(a['name'] for a in assets if a['name'].endswith('.tar.gz')))")
-      curl -fsSL "https://github.com/Navibyte-Innovations-Pvt-Ltd/gai-tools/releases/latest/download/${TARBALL}" \
+      curl -fsSL "https://github.com/Navibyte-Innovations-Pvt-Ltd/gai-tools/releases/latest/download/${_TARBALL}" \
         | tar -xz -C "$TMP"
       bash "$TMP/install.sh"
       rm -rf "$TMP"
-      echo "✓ gai-tools updated"
+      echo "$_NEW_VERSION" > "$_VERSION_FILE"
+
+      echo "✓ gai-tools $_OLD_VERSION → $_NEW_VERSION"
+
+      # Restart watchers in their original dirs.
+      if [[ ${#_WATCH_DIRS[@]} -gt 0 ]]; then
+        echo "→ Restarting gai-watch in ${#_WATCH_DIRS[@]} repo(s)…"
+        for _dir in "${_WATCH_DIRS[@]}"; do
+          if [[ -d "$_dir/.git" || -f "$_dir/.git" ]]; then
+            (cd "$_dir" && gai-watch >> "/tmp/gai-watch-$(basename "$_dir").log" 2>&1 &)
+            echo "   ↺  $_dir"
+          fi
+        done
+      fi
       exit 0
       ;;
     pr)
