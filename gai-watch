@@ -42,29 +42,24 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 
 echo "── gai-watch $(date '+%Y-%m-%d %H:%M:%S') repo:$REPO_ROOT ──"
 
-# Collect all repo roots and their index files (parent + submodules).
-REPO_ROOTS=("$REPO_ROOT")
+# Watch targets: parent index + .git/modules/ (catches submodule staging even if
+# submodules are added after gai-watch starts). Submodule repos are re-enumerated
+# dynamically on each trigger so new submodules are picked up without a restart.
 WATCH_TARGETS=("$INDEX")
+MODULES_DIR="$GIT_DIR/modules"
+[[ -d "$MODULES_DIR" ]] && WATCH_TARGETS+=("$MODULES_DIR")
 
+# Collect submodule roots for the startup banner only.
+SUBMOD_COUNT=0
 # shellcheck disable=SC2016
 while IFS= read -r submod_path; do
   [[ -z "$submod_path" ]] && continue
-  submod_root="$REPO_ROOT/$submod_path"
-  submod_git=$(git -C "$submod_root" rev-parse --git-dir 2>/dev/null) || continue
-  if [[ "$submod_git" = /* ]]; then
-    submod_index="$submod_git/index"
-  else
-    submod_index="$submod_root/$submod_git/index"
-  fi
-  if [[ -f "$submod_index" ]]; then
-    REPO_ROOTS+=("$submod_root")
-    WATCH_TARGETS+=("$submod_index")
-  fi
+  SUBMOD_COUNT=$((SUBMOD_COUNT + 1))
 done < <(git -C "$REPO_ROOT" submodule --quiet foreach --recursive 'echo "$displaypath"' 2>/dev/null)
 
 echo "👁  gai-watch active → $REPO_ROOT"
-if [[ ${#REPO_ROOTS[@]} -gt 1 ]]; then
-  echo "   + $((${#REPO_ROOTS[@]} - 1)) submodule(s) watched."
+if [[ $SUBMOD_COUNT -gt 0 ]]; then
+  echo "   + $SUBMOD_COUNT submodule(s) watched."
 fi
 echo "   Stage files in VS Code to auto-commit. Ctrl+C to stop."
 echo ""
@@ -78,7 +73,16 @@ _last_run_file() {
 }
 
 fswatch -o --latency "$DEBOUNCE" "${WATCH_TARGETS[@]}" | while read -r _; do
-  for repo in "${REPO_ROOTS[@]}"; do
+  # Re-enumerate submodules on every trigger so submodules added after startup
+  # are handled without restarting gai-watch.
+  CURRENT_REPOS=("$REPO_ROOT")
+  # shellcheck disable=SC2016
+  while IFS= read -r submod_path; do
+    [[ -z "$submod_path" ]] && continue
+    CURRENT_REPOS+=("$REPO_ROOT/$submod_path")
+  done < <(git -C "$REPO_ROOT" submodule --quiet foreach --recursive 'echo "$displaypath"' 2>/dev/null)
+
+  for repo in "${CURRENT_REPOS[@]}"; do
     STAGED=$(git -C "$repo" diff --cached --name-only 2>/dev/null) || continue
     [[ -z "$STAGED" ]] && continue
 
