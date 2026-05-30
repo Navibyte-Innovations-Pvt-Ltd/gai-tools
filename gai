@@ -122,20 +122,19 @@ Branch: $CURRENT_BRANCH
 Commits:
 $PR_COMMITS"
 
-  _pr_body_prompt="Generate a GitHub pull request body in markdown for these commits.
-Use this exact structure:
-## Summary
-- bullet 1
-- bullet 2
+  _pr_body_prompt="Generate a GitHub pull request body in markdown.
+Use this exact structure — fill every section with real content, no placeholders:
+
+## What and why
+2-3 sentences explaining: what problem or limitation existed before this PR, why it occurred (root cause), and what this PR does to fix or add it. Name the specific files, functions, or behaviors involved.
 
 ## Changes
 $PR_DIFF_STAT
 
 ## Test plan
-- [ ] test step 1
-- [ ] test step 2
+- [ ] Write specific, actionable test steps based on what actually changed. Not generic steps.
 
-Keep it concise. Reply with ONLY the markdown body.
+Reply with ONLY the markdown. No preamble. No backticks around the whole response.
 
 Branch: $CURRENT_BRANCH
 Commits:
@@ -180,7 +179,7 @@ except Exception:
     while IFS= read -r _line; do
       _pr_bullets+="- ${_line}"$'\n'
     done <<< "$PR_COMMITS"
-    PR_BODY="## Summary
+    PR_BODY="## What and why
 ${_pr_bullets}
 ## Changes
 $PR_DIFF_STAT"
@@ -303,9 +302,13 @@ gen_message() {
 Reply with ONLY the commit message on one line. No explanation. No backticks. No quotes.
 
 Format: type(scope): short description
-Types: feat fix refactor style docs test chore perf
-Scope: most specific component or directory name from path: $file
-Description: imperative mood, max 60 chars.
+Rules:
+- type: feat fix refactor style docs test chore perf
+- scope: most specific component name from file path: $file
+- description: imperative mood, max 72 chars
+- describe WHY the change was needed or what problem it solves, not just what file changed
+- good: \"fix(gai-watch): watch submodule indices so VS Code staging triggers auto-commit\"
+- bad: \"fix(gai-watch): update index watching logic\"
 
 Diff:
 $diff"
