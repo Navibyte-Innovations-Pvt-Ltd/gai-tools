@@ -114,9 +114,15 @@ if [[ "${_gai_pr:-false}" == "true" ]]; then
   PR_DIFF_STAT=$(git diff "origin/$BASE_BRANCH"...HEAD --stat 2>/dev/null)
 
   _pr_title_prompt="Generate a GitHub pull request title for these commits.
-Reply with ONLY the title on one line. No explanation. No backticks. No quotes.
-Format: type(scope): short description (conventional commit style, max 70 chars)
-Types: feat fix refactor style docs test chore perf
+Reply with ONLY the title on one line. No explanation. No backticks. No quotes. No trailing period.
+Format: type(scope): short description
+Rules:
+- type: feat fix refactor style docs test chore perf
+- scope: single word, most specific component changed
+- description: imperative mood, HARD LIMIT 50 chars after the colon
+- Total title MUST be under 72 characters. Count carefully.
+- BAD: \"feat(glitchbridge): add authentication flow to glitchbridge electron app server\"
+- GOOD: \"feat(glitchbridge): add auth flow to electron server\"
 
 Branch: $CURRENT_BRANCH
 Commits:
@@ -151,7 +157,11 @@ try:
   d = json.load(sys.stdin)
   msg = d.get('response', '').strip()
   lines = [l.strip() for l in msg.splitlines() if l.strip()]
-  print(lines[0] if lines else '')
+  title = lines[0] if lines else ''
+  # Hard truncate at word boundary if model ignores the 72-char instruction.
+  if len(title) > 72:
+    title = title[:72].rsplit(' ', 1)[0].rstrip(',:;-')
+  print(title)
 except Exception:
   pass
 " || true)
