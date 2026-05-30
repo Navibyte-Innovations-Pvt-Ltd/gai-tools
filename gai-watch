@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# gai-watch — auto-run gai whenever files are staged in this git repo
+# gai-watch — auto-run gai whenever files are staged in this git repo or its submodules
 # Usage: gai-watch [--dry-run]
 #   Run once per repo in a terminal tab. Stage files in VS Code → auto-commits.
 
@@ -19,6 +19,7 @@ for arg in "$@"; do
     --help|-h)
       echo "Usage: gai-watch [--dry-run]"
       echo "  Watches .git/index and auto-runs gai when files are staged."
+      echo "  Also watches submodule indices if submodules are present."
       echo "  Run once in a terminal tab. Stage files in VS Code → they commit."
       echo "  Logs saved to \$GAI_LOG_DIR (default: ~/.gai/logs) for 24 h."
       exit 0
@@ -40,26 +41,57 @@ LOG_FILE="$LOG_DIR/$(date +%Y-%m-%d).watch.log"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 echo "── gai-watch $(date '+%Y-%m-%d %H:%M:%S') repo:$REPO_ROOT ──"
+
+# Collect all repo roots and their index files (parent + submodules).
+REPO_ROOTS=("$REPO_ROOT")
+WATCH_TARGETS=("$INDEX")
+
+# shellcheck disable=SC2016
+while IFS= read -r submod_path; do
+  [[ -z "$submod_path" ]] && continue
+  submod_root="$REPO_ROOT/$submod_path"
+  submod_git=$(git -C "$submod_root" rev-parse --git-dir 2>/dev/null) || continue
+  if [[ "$submod_git" = /* ]]; then
+    submod_index="$submod_git/index"
+  else
+    submod_index="$submod_root/$submod_git/index"
+  fi
+  if [[ -f "$submod_index" ]]; then
+    REPO_ROOTS+=("$submod_root")
+    WATCH_TARGETS+=("$submod_index")
+  fi
+done < <(git -C "$REPO_ROOT" submodule --quiet foreach --recursive 'echo "$displaypath"' 2>/dev/null)
+
 echo "👁  gai-watch active → $REPO_ROOT"
+if [[ ${#REPO_ROOTS[@]} -gt 1 ]]; then
+  echo "   + $((${#REPO_ROOTS[@]} - 1)) submodule(s) watched."
+fi
 echo "   Stage files in VS Code to auto-commit. Ctrl+C to stop."
 echo ""
 
 DEBOUNCE=2
-LAST_RUN=0
 
-fswatch -o --latency "$DEBOUNCE" "$INDEX" | while read -r _; do
-  STAGED=$(git -C "$REPO_ROOT" diff --cached --name-only 2>/dev/null)
-  if [[ -z "$STAGED" ]]; then
-    continue
-  fi
+_last_run_file() {
+  local repo_hash
+  repo_hash=$(echo "$1" | md5)
+  echo "/tmp/gai-watch-lastrun-${repo_hash}"
+}
 
-  NOW=$(date +%s)
-  if (( NOW - LAST_RUN < 5 )); then
-    continue
-  fi
-  LAST_RUN=$NOW
+fswatch -o --latency "$DEBOUNCE" "${WATCH_TARGETS[@]}" | while read -r _; do
+  for repo in "${REPO_ROOTS[@]}"; do
+    STAGED=$(git -C "$repo" diff --cached --name-only 2>/dev/null) || continue
+    [[ -z "$STAGED" ]] && continue
 
-  echo "━━━ $(date '+%H:%M:%S') staged: $(echo "$STAGED" | wc -l | tr -d ' ') file(s) ━━━"
-  (cd "$REPO_ROOT" && gai ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"})
-  echo ""
+    last_run_f=$(_last_run_file "$repo")
+    last_run=$(cat "$last_run_f" 2>/dev/null || echo "0")
+    NOW=$(date +%s)
+    if (( NOW - last_run < 5 )); then
+      continue
+    fi
+    echo "$NOW" > "$last_run_f"
+
+    echo "━━━ $(date '+%H:%M:%S') staged: $(echo "$STAGED" | wc -l | tr -d ' ') file(s) in $(basename "$repo") ━━━"
+    (cd "$repo" && gai ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}) || true
+    echo ""
+  done
 done
