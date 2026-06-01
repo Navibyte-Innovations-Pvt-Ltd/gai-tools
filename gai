@@ -20,6 +20,90 @@ _prune_logs() {
   find "$LOG_DIR" -name "*.log" -mmin +1440 -delete 2>/dev/null || true
 }
 
+# ── issue subcommand ──────────────────────────────────────────────────────────
+
+if [[ "${1:-}" == "issue" ]]; then
+  _issue_url="${2:-}"
+
+  if [[ -z "$_issue_url" ]]; then
+    echo "Usage: gai issue <github-issue-url>" >&2
+    exit 1
+  fi
+
+  _issue_num=$(echo "$_issue_url" | grep -oE '/issues/[0-9]+' | grep -oE '[0-9]+')
+  _issue_repo=$(echo "$_issue_url" | grep -oE 'github\.com/[^/]+/[^/]+' | sed 's|github\.com/||')
+
+  if [[ -z "$_issue_num" || -z "$_issue_repo" ]]; then
+    echo "error: invalid GitHub issue URL: $_issue_url" >&2
+    echo "  Expected: https://github.com/owner/repo/issues/123" >&2
+    exit 1
+  fi
+
+  if ! command -v gh > /dev/null 2>&1; then
+    echo "error: gh CLI not installed." >&2
+    echo "  Install: brew install gh && gh auth login" >&2
+    exit 1
+  fi
+
+  if ! gh auth status > /dev/null 2>&1; then
+    echo "error: gh CLI not authenticated. Run: gh auth login" >&2
+    exit 1
+  fi
+
+  echo "→ Fetching open PRs for $_issue_repo…"
+
+  _pr_list=()
+  while IFS= read -r _line; do
+    [[ -n "$_line" ]] && _pr_list+=("$_line")
+  done < <(gh pr list --repo "$_issue_repo" --state open --json number,title --jq '.[] | "\(.number)|\(.title)"')
+
+  if [[ ${#_pr_list[@]} -eq 0 ]]; then
+    echo "No open PRs in $_issue_repo." >&2
+    exit 1
+  fi
+
+  _pr_num=""
+  if [[ ${#_pr_list[@]} -eq 1 ]]; then
+    _pr_num=$(echo "${_pr_list[0]}" | cut -d'|' -f1)
+    _pr_title=$(echo "${_pr_list[0]}" | cut -d'|' -f2)
+    echo "→ Auto-selecting PR #$_pr_num: $_pr_title"
+  else
+    echo ""
+    echo "Multiple open PRs — select one:"
+    _pr_options=()
+    for _entry in "${_pr_list[@]}"; do
+      _n=$(echo "$_entry" | cut -d'|' -f1)
+      _t=$(echo "$_entry" | cut -d'|' -f2)
+      _pr_options+=("#$_n: $_t")
+    done
+    PS3="Enter number: "
+    select _opt in "${_pr_options[@]}"; do
+      if [[ -n "$_opt" ]]; then
+        _idx=$(( REPLY - 1 ))
+        _pr_num=$(echo "${_pr_list[$_idx]}" | cut -d'|' -f1)
+        _pr_title=$(echo "${_pr_list[$_idx]}" | cut -d'|' -f2)
+        break
+      fi
+      echo "Invalid choice. Try again."
+    done
+  fi
+
+  _pr_body=$(gh pr view "$_pr_num" --repo "$_issue_repo" --json body --jq '.body')
+
+  if echo "$_pr_body" | grep -qE "#${_issue_num}([^0-9]|$)"; then
+    echo "Issue #$_issue_num already referenced in PR #$_pr_num."
+    exit 0
+  fi
+
+  gh pr edit "$_pr_num" --repo "$_issue_repo" --body "${_pr_body}
+Closes #${_issue_num}"
+
+  echo "✓ Added \"Closes #${_issue_num}\" to PR #${_pr_num}"
+  exit 0
+fi
+
+# ── flag parsing ──────────────────────────────────────────────────────────────
+
 for arg in "$@"; do
   case "$arg" in
     --dry-run|-n) DRY_RUN=true ;;
@@ -53,13 +137,14 @@ for arg in "$@"; do
       _gai_pr=true
       ;;
     --help|-h)
-      echo "Usage: gai [--all] [--dry-run] [--logs] [update] [pr]"
-      echo "  Default : commit staged files one by one (AI message per file)"
-      echo "  --all   : commit all dirty files instead of staged"
-      echo "  --dry-run: show messages without committing"
-      echo "  --logs  : show last 24 h of activity (\$GAI_LOG_DIR)"
-      echo "  update  : pull latest version from GitHub"
-      echo "  pr      : create a GitHub PR from current branch (requires gh CLI)"
+      echo "Usage: gai [--all] [--dry-run] [--logs] [update] [pr] [issue <url>]"
+      echo "  Default      : commit staged files one by one (AI message per file)"
+      echo "  --all        : commit all dirty files instead of staged"
+      echo "  --dry-run    : show messages without committing"
+      echo "  --logs       : show last 24 h of activity (\$GAI_LOG_DIR)"
+      echo "  update       : pull latest version from GitHub"
+      echo "  pr           : create a GitHub PR from current branch (requires gh CLI)"
+      echo "  issue <url>  : attach a GitHub issue to an open PR (auto if one PR, select if many)"
       echo ""
       echo "Model: \$GAI_MODEL (default: $MODEL)"
       echo "Requires: ollama running + model pulled"
