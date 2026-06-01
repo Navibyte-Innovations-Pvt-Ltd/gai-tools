@@ -91,7 +91,7 @@ if [[ "${1:-}" == "issue" ]]; then
     exit 1
   fi
 
-  echo "→ Fetching open PRs for $_issue_repo…"
+  echo "→ Fetching open PRs for ${_issue_repo}…"
 
   _pr_list=()
   while IFS= read -r _line; do
