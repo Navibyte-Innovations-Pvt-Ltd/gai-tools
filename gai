@@ -158,14 +158,20 @@ for arg in "$@"; do
       ;;
     update)
       echo "→ Updating gai-tools from GitHub…"
+      _old_ver=$(cat "$HOME/.gai/version" 2>/dev/null || echo "unknown")
       TMP=$(mktemp -d)
-      TARBALL=$(curl -fsSL https://api.github.com/repos/Navibyte-Innovations-Pvt-Ltd/gai-tools/releases/latest \
-        | python3 -c "import sys,json; assets=json.load(sys.stdin)['assets']; print(next(a['name'] for a in assets if a['name'].endswith('.tar.gz')))")
+      _release_json=$(curl -fsSL https://api.github.com/repos/Navibyte-Innovations-Pvt-Ltd/gai-tools/releases/latest)
+      _new_ver=$(echo "$_release_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('tag_name','').lstrip('v'))" 2>/dev/null || echo "")
+      TARBALL=$(echo "$_release_json" | python3 -c "import sys,json; assets=json.load(sys.stdin)['assets']; print(next(a['name'] for a in assets if a['name'].endswith('.tar.gz')))")
       curl -fsSL "https://github.com/Navibyte-Innovations-Pvt-Ltd/gai-tools/releases/latest/download/${TARBALL}" \
         | tar -xz -C "$TMP"
       bash "$TMP/install.sh"
       rm -rf "$TMP"
-      echo "✓ gai-tools updated"
+      if [[ -n "$_new_ver" && "$_old_ver" != "$_new_ver" ]]; then
+        echo "✓ gai-tools updated  v${_old_ver} → v${_new_ver}"
+      else
+        echo "✓ gai-tools updated  v${_new_ver} (already latest)"
+      fi
       exit 0
       ;;
     pr)
