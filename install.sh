@@ -262,6 +262,9 @@ fi
 
 # ── done ─────────────────────────────────────────────────────────────────────
 
+mkdir -p "$HOME/.gai"
+echo "$VERSION" > "$HOME/.gai/version"
+
 echo ""
 echo "━━━ gai-tools v$VERSION installed ━━━"
 echo ""
