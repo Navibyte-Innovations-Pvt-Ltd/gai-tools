@@ -476,10 +476,6 @@ commit_file() {
     echo "  ⚠ skip (secret): $file"
     return 1
   fi
-  if [[ ! -e "$file" ]]; then
-    echo "  ⚠ skip (missing): $file"
-    return 1
-  fi
 
   echo ""
   echo "── $file"
@@ -561,8 +557,8 @@ else
 
   COMMITTED=0 SKIPPED=()
   for FILE in "${FILES[@]}"; do
-    if is_secret "$FILE" || [[ ! -e "$FILE" ]]; then
-      is_secret "$FILE" && echo "  ⚠ skip (secret): $FILE"
+    if is_secret "$FILE"; then
+      echo "  ⚠ skip (secret): $FILE"
       SKIPPED+=("$FILE")
       continue
     fi
