@@ -86,6 +86,16 @@ fswatch -o --latency "$DEBOUNCE" "${WATCH_TARGETS[@]}" | while read -r _; do
     STAGED=$(git -C "$repo" diff --cached --name-only 2>/dev/null) || continue
     [[ -z "$STAGED" ]] && continue
 
+    # Skip while another git process (Claude Code, IDE, user shell) is mid-operation —
+    # racing it here (gai does `git reset` + per-file re-stage) can auto-commit half-
+    # finished work or collide on the index. The next fswatch trigger will retry.
+    repo_git_dir=$(git -C "$repo" rev-parse --git-dir 2>/dev/null) || continue
+    [[ "$repo_git_dir" != /* ]] && repo_git_dir="$repo/$repo_git_dir"
+    if [[ -f "$repo_git_dir/index.lock" ]]; then
+      echo "$(date '+%H:%M:%S') skip: index.lock held (another git process active) in $(basename "$repo")"
+      continue
+    fi
+
     last_run_f=$(_last_run_file "$repo")
     last_run=$(cat "$last_run_f" 2>/dev/null || echo "0")
     NOW=$(date +%s)
