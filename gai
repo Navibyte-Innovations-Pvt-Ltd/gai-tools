@@ -432,20 +432,41 @@ is_secret() {
      "$f" == *".key"  || "$f" == *"id_rsa"*       || "$f" == *"id_ed25519"* ]]
 }
 
+# Deterministic short scope derived from a file path — used both as a prompt
+# hint (small models copy raw paths verbatim if asked to "derive" one) and as
+# a fallback when the model's own scope is unusable (contains "/", too long).
+_short_scope() {
+  local file="$1" base dir
+  base=$(basename "$file")
+  base="${base%.*}"
+  case "$base" in
+    index|route|page|actions|action|schema|schemas|types|utils|hooks|constants|config|page.tsx)
+      dir=$(dirname "$file")
+      base=$(basename "$dir")
+      ;;
+  esac
+  base=$(echo "$base" | sed -E 's/\[[^]]*\]//g')
+  base=$(echo "$base" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9._-]+/-/g' | sed -E 's/^-+|-+$//g')
+  [[ -z "$base" ]] && base="repo"
+  echo "$base"
+}
+
 gen_message() {
   local file="$1" diff="$2"
+  local suggested_scope
+  suggested_scope=$(_short_scope "$file")
   local prompt="Write a git commit message in conventional commit format for this diff.
 Reply with ONLY the commit message on one line. No explanation. No backticks. No quotes.
 
 Format: type(scope): short description
 Rules:
 - type: feat fix refactor style docs test chore perf
-- scope: most specific component name from file path: $file
-- description: imperative mood, max 72 chars
+- scope: ONE short word or hyphenated component name, 1-3 words, NO slashes, NO file extensions, NOT the raw file path. Suggested scope for this file: $suggested_scope — use it unless a shorter/more accurate component name is obvious from the diff.
+- description: imperative mood, max 72 chars, describe the ACTUAL change in THIS diff — never a generic phrase like \"update logic\" or \"update index watching logic\"
 - describe WHY the change was needed or what problem it solves, not just what file changed
-- good: \"fix(gai-watch): watch submodule indices so VS Code staging triggers auto-commit\"
-- bad: \"fix(gai-watch): update index watching logic\"
+- example of the format only (do not reuse this wording): \"fix(auth): stop clearing session on token refresh\"
 
+File: $file
 Diff:
 $diff"
 
@@ -457,7 +478,8 @@ $diff"
     -H "Content-Type: application/json" \
     -d "{\"model\":\"$MODEL\",\"prompt\":$escaped,\"stream\":false}")
 
-  python3 -c "
+  local msg
+  msg=$(python3 -c "
 import sys, json
 try:
   d = json.load(sys.stdin)
@@ -466,7 +488,42 @@ try:
   print(lines[0] if lines else '')
 except Exception:
   pass
-" <<< "$response" || true
+" <<< "$response" || true)
+
+  _sanitize_message "$msg" "$file" "$suggested_scope"
+}
+
+# Guards against two small-model failure modes seen in practice:
+#  1. scope echoes the raw file path instead of a short component name
+#  2. on a low-signal diff (e.g. a one-line config bump) the model parrots
+#     boilerplate like "update index watching logic" instead of describing
+#     the actual change
+_sanitize_message() {
+  local msg="$1" file="$2" fallback_scope="$3"
+
+  if [[ -z "$msg" ]]; then
+    echo ""
+    return
+  fi
+
+  local re='^([a-z]+)\((.*)\):[[:space:]]*(.*)$'
+  if [[ "$msg" =~ $re ]]; then
+    local type="${BASH_REMATCH[1]}" scope="${BASH_REMATCH[2]}" desc="${BASH_REMATCH[3]}"
+
+    if [[ "$scope" == *"/"* || ${#scope} -gt 24 ]]; then
+      scope="$fallback_scope"
+    fi
+
+    case "$desc" in
+      *"index watching logic"*|*"update logic"*|"update index watching"*)
+        desc="update $(basename "$file")"
+        ;;
+    esac
+
+    echo "${type}(${scope}): ${desc}"
+  else
+    echo "$msg"
+  fi
 }
 
 commit_file() {
