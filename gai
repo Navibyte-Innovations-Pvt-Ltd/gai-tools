@@ -182,8 +182,45 @@ for arg in "$@"; do
     pr)
       _gai_pr=true
       ;;
+    pause)
+      mkdir -p "$HOME/.gai"
+      touch "$HOME/.gai/paused"
+      echo "⏸  Auto-commit paused. 'gai pr' and 'gai issue' still work."
+      echo "   Resume with: gai resume"
+      exit 0
+      ;;
+    resume)
+      rm -f "$HOME/.gai/paused"
+      echo "▶  Auto-commit resumed."
+      exit 0
+      ;;
+    remove|uninstall)
+      echo "This will remove gai/gai-watch, stop all watchers, and remove the ~/.zshrc hook."
+      read -rp "Continue? [y/N] " _confirm
+      if [[ "$_confirm" != "y" && "$_confirm" != "Y" ]]; then
+        echo "Aborted."
+        exit 0
+      fi
+
+      pkill -f gai-watch 2>/dev/null || true
+      rm -f /tmp/gai-watch-*.pid
+
+      if grep -q "gai-tools:" "$HOME/.zshrc" 2>/dev/null; then
+        sed -i '' '/# gai-tools: auto-start/,/# end gai-tools/d' "$HOME/.zshrc"
+        echo "✓ Removed hook from ~/.zshrc"
+      fi
+
+      rm -f "$HOME/.local/bin/gai" "$HOME/.local/bin/gai-watch"
+      echo "✓ Removed gai and gai-watch from ~/.local/bin"
+
+      echo ""
+      echo "gai-tools uninstalled. Ollama and fswatch were left in place."
+      echo "  To remove them: brew uninstall ollama fswatch"
+      echo "  Reload shell: source ~/.zshrc"
+      exit 0
+      ;;
     --help|-h)
-      echo "Usage: gai [--all] [--dry-run] [--version] [--logs] [update] [pr] [issue <url>]"
+      echo "Usage: gai [--all] [--dry-run] [--version] [--logs] [update] [pr] [issue <url>] [pause] [resume] [remove]"
       echo "  Default      : commit staged files one by one (AI message per file)"
       echo "  --all        : commit all dirty files instead of staged"
       echo "  --dry-run    : show messages without committing"
@@ -192,6 +229,9 @@ for arg in "$@"; do
       echo "  update       : pull latest version from GitHub"
       echo "  pr           : create a GitHub PR from current branch (requires gh CLI)"
       echo "  issue <url>  : attach a GitHub issue to an open PR (auto if one PR, select if many)"
+      echo "  pause        : stop auto-commit (gai pr / gai issue keep working)"
+      echo "  resume       : re-enable auto-commit after 'gai pause'"
+      echo "  remove       : uninstall gai/gai-watch (alias: uninstall)"
       echo ""
       echo "Model: \$GAI_MODEL (default: $MODEL)"
       echo "Requires: ollama running + model pulled"
@@ -341,6 +381,13 @@ $PR_DIFF_STAT"
   echo "✓ PR created: $PR_URL"
   echo "  Branch: $CURRENT_BRANCH → $BASE_BRANCH"
   echo "  Title:  $PR_TITLE"
+  exit 0
+fi
+
+# ── paused check ─────────────────────────────────────────────────────────────
+
+if [[ -f "$HOME/.gai/paused" ]]; then
+  echo "⏸  Auto-commit paused (gai pause). Run 'gai resume' to re-enable." >&2
   exit 0
 fi
 
