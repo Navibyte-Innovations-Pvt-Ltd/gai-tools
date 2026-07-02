@@ -103,6 +103,7 @@ jobs:
           VERSION="${{ steps.version.outputs.VERSION }}"
           ARCHIVE="gai-tools-${VERSION}.tar.gz"
           tar -czf "$ARCHIVE" gai gai-watch install.sh uninstall.sh README.md LICENSE CHANGELOG.md docs/
+          cp "$ARCHIVE" gai-tools-latest.tar.gz
           echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
 
       - name: Create GitHub Release
@@ -131,7 +132,9 @@ jobs:
             gai --dry-run    # preview without committing
             gai-watch        # start watcher manually
             ```
-          files: ${{ env.ARCHIVE }}
+          files: |
+            ${{ env.ARCHIVE }}
+            gai-tools-latest.tar.gz
 
       - name: Set up Node.js for npm publish
         uses: actions/setup-node@v4
