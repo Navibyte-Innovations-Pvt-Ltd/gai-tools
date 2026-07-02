@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # gai — AI git commit using local Ollama (qwen2.5-coder:1.5b)
-# Usage: gai [--all] [--dry-run] [--logs]
+# Usage: gai [--all] [--dry-run] [--version] [--logs]
 #
 #   Default (no flags): commit STAGED files one by one
 #   --all              : commit ALL dirty files one by one
 #   --dry-run          : print messages, don't commit
+#   --version          : print installed gai-tools version
 #   --logs             : show last 24 h of activity
 
 set -euo pipefail
@@ -143,6 +144,10 @@ for arg in "$@"; do
   case "$arg" in
     --dry-run|-n) DRY_RUN=true ;;
     --all)        MODE="all" ;;
+    --version|-v)
+      echo "gai v$(cat "$HOME/.gai/version" 2>/dev/null || echo "unknown")"
+      exit 0
+      ;;
     --logs)
       _prune_logs
       _lf=()
@@ -178,10 +183,11 @@ for arg in "$@"; do
       _gai_pr=true
       ;;
     --help|-h)
-      echo "Usage: gai [--all] [--dry-run] [--logs] [update] [pr] [issue <url>]"
+      echo "Usage: gai [--all] [--dry-run] [--version] [--logs] [update] [pr] [issue <url>]"
       echo "  Default      : commit staged files one by one (AI message per file)"
       echo "  --all        : commit all dirty files instead of staged"
       echo "  --dry-run    : show messages without committing"
+      echo "  --version    : print installed gai-tools version"
       echo "  --logs       : show last 24 h of activity (\$GAI_LOG_DIR)"
       echo "  update       : pull latest version from GitHub"
       echo "  pr           : create a GitHub PR from current branch (requires gh CLI)"
