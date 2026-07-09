@@ -283,7 +283,7 @@ if [[ "${_gai_pr:-false}" == "true" ]]; then
     exit 1
   fi
 
-  PR_DIFF_STAT=$(git diff "origin/$BASE_BRANCH"...HEAD --stat 2>/dev/null)
+  PR_DIFF_STAT=$(git diff --no-ext-diff "origin/$BASE_BRANCH"...HEAD --stat 2>/dev/null)
 
   _pr_title_prompt="Generate a GitHub pull request title for these commits.
 Reply with ONLY the title on one line. No explanation. No backticks. No quotes. No trailing period.
@@ -591,7 +591,7 @@ commit_file() {
   echo "── $file"
 
   local diff
-  diff=$(git diff --cached -- "$file")
+  diff=$(git diff --no-ext-diff --cached -- "$file")
   if [[ -z "$diff" ]]; then
     echo "  (empty staged diff — skipping)"
     return 1
@@ -676,9 +676,9 @@ else
     local_status=$(git status --short -- "$FILE" | awk '{print $1}')
     local_diff=""
     if [[ "$local_status" == "??" ]]; then
-      local_diff=$(git diff --no-index /dev/null "$FILE" 2>/dev/null || true)
+      local_diff=$(git diff --no-ext-diff --no-index /dev/null "$FILE" 2>/dev/null || true)
     else
-      local_diff=$(git diff -- "$FILE")
+      local_diff=$(git diff --no-ext-diff -- "$FILE")
     fi
     [[ -z "$local_diff" ]] && continue
 
