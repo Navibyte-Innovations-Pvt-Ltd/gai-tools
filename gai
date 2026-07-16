@@ -25,10 +25,19 @@ _prune_logs() {
 # Sets global _MENU_RESULT to the 0-based index of the chosen item.
 
 _gai_select_menu() {
-  local _idx=0 _count=$# _key _esc _i _opt
+  local _idx=0 _count=$# _key _esc _i _opt _cols _max _opts=()
+  _cols=$(tput cols 2>/dev/null || echo 80)
+  _max=$(( _cols - 4 ))
+  for _opt in "$@"; do
+    if [[ "${#_opt}" -gt "$_max" ]]; then
+      _opts+=("${_opt:0:$(( _max - 1 ))}…")
+    else
+      _opts+=("$_opt")
+    fi
+  done
   tput civis 2>/dev/null || true
   _i=0
-  for _opt in "$@"; do
+  for _opt in "${_opts[@]}"; do
     if [[ "$_i" -eq "$_idx" ]]; then
       printf "  \033[7m▶ %s\033[0m\n" "$_opt"
     else
@@ -49,7 +58,7 @@ _gai_select_menu() {
     fi
     printf "\033[%dA" "$_count"
     _i=0
-    for _opt in "$@"; do
+    for _opt in "${_opts[@]}"; do
       if [[ "$_i" -eq "$_idx" ]]; then
         printf "  \033[7m▶ %s\033[0m\033[K\n" "$_opt"
       else
