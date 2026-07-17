@@ -36,36 +36,33 @@ _gai_select_menu() {
     fi
   done
   tput civis 2>/dev/null || true
-  _i=0
-  for _opt in "${_opts[@]}"; do
-    if [[ "$_i" -eq "$_idx" ]]; then
-      printf "  \033[7m▶ %s\033[0m\n" "$_opt"
-    else
-      printf "    %s\n" "$_opt"
-    fi
-    _i=$(( _i + 1 ))
-  done
+  tput sc 2>/dev/null || true
+  _gai_menu_draw() {
+    tput rc 2>/dev/null || true
+    tput ed 2>/dev/null || true
+    _i=0
+    for _opt in "${_opts[@]}"; do
+      if [[ "$_i" -eq "$_idx" ]]; then
+        printf "  \033[7m▶ %s\033[0m\n" "$_opt"
+      else
+        printf "    %s\n" "$_opt"
+      fi
+      _i=$(( _i + 1 ))
+    done
+  }
+  _gai_menu_draw
   while true; do
     IFS= read -rsn1 _key
     if [[ "$_key" == $'\x1b' ]]; then
-      IFS= read -rsn2 -t 0.1 _esc || true
+      IFS= read -rsn2 -t 0.5 _esc || true
       case "$_esc" in
         '[A') if [[ "$_idx" -gt 0 ]]; then _idx=$(( _idx - 1 )); fi ;;
         '[B') if [[ "$_idx" -lt $(( _count - 1 )) ]]; then _idx=$(( _idx + 1 )); fi ;;
       esac
+      _gai_menu_draw
     elif [[ "$_key" == '' || "$_key" == $'\r' ]]; then
       break
     fi
-    printf "\033[%dA" "$_count"
-    _i=0
-    for _opt in "${_opts[@]}"; do
-      if [[ "$_i" -eq "$_idx" ]]; then
-        printf "  \033[7m▶ %s\033[0m\033[K\n" "$_opt"
-      else
-        printf "    %s\033[K\n" "$_opt"
-      fi
-      _i=$(( _i + 1 ))
-    done
   done
   tput cnorm 2>/dev/null || true
   _MENU_RESULT=$_idx
