@@ -25,7 +25,7 @@ _prune_logs() {
 # Sets global _MENU_RESULT to the 0-based index of the chosen item.
 
 _gai_select_menu() {
-  local _idx=0 _count=$# _key _esc _i _opt _cols _max _opts=()
+  local _idx=0 _count=$# _key _esc _i _opt _cols _max _opts=() _drawn=0
   _cols=$(tput cols 2>/dev/null || echo 80)
   _max=$(( _cols - 4 ))
   for _opt in "$@"; do
@@ -36,12 +36,13 @@ _gai_select_menu() {
     fi
   done
   tput civis 2>/dev/null || true
-  tput sc 2>/dev/null || true
   _gai_menu_draw() {
-    tput rc 2>/dev/null || true
-    tput ed 2>/dev/null || true
+    if [[ "$_drawn" -eq 1 ]]; then
+      printf "\033[%dA" "$_count"
+    fi
     _i=0
     for _opt in "${_opts[@]}"; do
+      printf "\033[2K"
       if [[ "$_i" -eq "$_idx" ]]; then
         printf "  \033[7m▶ %s\033[0m\n" "$_opt"
       else
@@ -49,6 +50,7 @@ _gai_select_menu() {
       fi
       _i=$(( _i + 1 ))
     done
+    _drawn=1
   }
   _gai_menu_draw
   while true; do
