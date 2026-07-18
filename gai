@@ -54,7 +54,7 @@ _gai_select_menu() {
   while true; do
     IFS= read -rsn1 _key
     if [[ "$_key" == $'\x1b' ]]; then
-      IFS= read -rsn2 -t 0.5 _esc || true
+      IFS= read -rsn2 -t 1 _esc || true
       case "$_esc" in
         '[A') if [[ "$_idx" -gt 0 ]]; then _idx=$(( _idx - 1 )); fi ;;
         '[B') if [[ "$_idx" -lt $(( _count - 1 )) ]]; then _idx=$(( _idx + 1 )); fi ;;
