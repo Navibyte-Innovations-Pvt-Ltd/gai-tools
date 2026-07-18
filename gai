@@ -419,6 +419,13 @@ if ! git rev-parse --git-dir > /dev/null 2>&1; then
   exit 1
 fi
 
+GIT_DIR=$(git rev-parse --git-dir 2>/dev/null)
+if [[ -f "$GIT_DIR/MERGE_HEAD" ]] || git status --short | grep -qE '^(UU|AA|DD|AU|UA|UD|DU) '; then
+  echo "⏸  Merge in progress with unresolved conflicts — refusing to auto-commit." >&2
+  echo "   Resolve conflicts, 'git add' the files, then commit manually." >&2
+  exit 0
+fi
+
 if ! curl -s --connect-timeout 2 "http://localhost:11434" > /dev/null 2>&1; then
   echo "error: Ollama not running." >&2
   echo "  Start:   ollama serve" >&2
