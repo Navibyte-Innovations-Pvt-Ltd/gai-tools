@@ -442,7 +442,14 @@ _ensure_watch() {
   pidfile="/tmp/gai-watch-${repo_hash}.pid"
   if [[ -f "$pidfile" ]]; then
     pid=$(awk '{print $1}' "$pidfile" 2>/dev/null)
-    kill -0 "$pid" 2>/dev/null && return 0
+    # `kill -0` alone trusts a recycled PID: once some unrelated process inherits
+    # that number the watcher looks alive forever and is never restarted. Confirm
+    # the process really is a gai-watch before believing the file.
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null &&
+       ps -p "$pid" -o command= 2>/dev/null | grep -q "gai-watch"; then
+      return 0
+    fi
+    echo "→ stale gai-watch pidfile (pid ${pid:-?} not running) — restarting watcher"
     rm -f "$pidfile"
   fi
   gai-watch > "/tmp/gai-watch-${repo_hash}.log" 2>&1 &
@@ -611,6 +618,10 @@ commit_file() {
   echo ""
   echo "── $file"
 
+  # Normalise the index for THIS file only, so the diff we describe is the
+  # content we are about to commit. Other files keep their staged state.
+  git add -- "$file" > /dev/null 2>&1 || true
+
   local diff
   diff=$(git diff --no-ext-diff --cached -- "$file")
   if [[ -z "$diff" ]]; then
@@ -630,44 +641,87 @@ commit_file() {
   if $DRY_RUN; then
     echo "  (dry-run)"
   else
-    git commit --no-verify -m "$msg"
+    # Pathspec-limited commit — records ONLY this file. A bare `git commit -m`
+    # here sweeps in anything another process staged while the model was
+    # generating the message, filing it under the wrong message entirely.
+    if ! git commit --no-verify -m "$msg" -- "$file"; then
+      echo "  ✗ commit failed — leaving $file staged"
+      return 1
+    fi
   fi
   return 0
 }
 
+# Newline-delimited set of paths this run has already handled, so the adopt pass
+# below never re-queues a file that was skipped (secret, empty diff, failed
+# commit) — those stay staged on purpose and would otherwise loop forever.
+SEEN=$'\n'
+
+_seen() {
+  case "$SEEN" in
+    *$'\n'"$1"$'\n'*) return 0 ;;
+  esac
+  return 1
+}
+
+_mark_seen() { SEEN="${SEEN}${1}"$'\n'; }
+
 # ── staged mode (default) ────────────────────────────────────────────────────
 
 if [[ "$MODE" == "staged" ]]; then
-  FILES=()
+  QUEUE=()
   while IFS= read -r line; do
-    [[ -n "$line" ]] && FILES+=("$line")
+    [[ -n "$line" ]] && QUEUE+=("$line")
   done < <(git diff --cached --name-only)
 
-  if [[ ${#FILES[@]} -eq 0 ]]; then
+  if [[ ${#QUEUE[@]} -eq 0 ]]; then
     echo "No staged files. Stage files with 'git add', or use --all for all dirty files."
     exit 0
   fi
 
-  echo "Staged: ${#FILES[@]} file(s) → committing one by one…"
+  echo "Staged: ${#QUEUE[@]} file(s) → committing one by one…"
 
-  # Unstage everything, then re-add one file at a time below.
-  # NEVER fall back to anything that empties the index (e.g. git rm --cached -r .):
-  # on failure that turns the next per-file commit into a mass-deletion of history.
-  if ! git reset -q; then
-    echo "error: 'git reset' failed — .git/index.lock is held by another git process." >&2
-    echo "  Aborting to avoid rewriting history. Retry once the other process finishes." >&2
-    exit 1
-  fi
+  # There is deliberately NO global `git reset` here. Every commit is
+  # pathspec-limited, so files further down the queue keep their staged state
+  # until their turn. If this run dies early, whatever it did not reach is still
+  # staged — not silently unstaged and forgotten.
 
   COMMITTED=0 SKIPPED=()
-  for FILE in "${FILES[@]}"; do
-    git add -- "$FILE"
-    if commit_file "$FILE"; then
-      COMMITTED=$((COMMITTED + 1))
-    else
-      git reset HEAD -- "$FILE" > /dev/null 2>&1 || true
-      SKIPPED+=("$FILE")
+  MAX_PASSES=5
+  PASS=1
+  while :; do
+    for FILE in "${QUEUE[@]}"; do
+      _seen "$FILE" && continue
+      _mark_seen "$FILE"
+      if commit_file "$FILE"; then
+        COMMITTED=$((COMMITTED + 1))
+      else
+        SKIPPED+=("$FILE")
+      fi
+    done
+
+    # Adopt whatever was staged while this run was busy. gai-watch's triggers for
+    # those files were dropped by the per-repo lock, so the finishing run is the
+    # only thing that knows the queue is not empty.
+    QUEUE=()
+    while IFS= read -r line; do
+      [[ -z "$line" ]] && continue
+      _seen "$line" && continue
+      QUEUE+=("$line")
+    done < <(git diff --cached --name-only)
+
+    [[ ${#QUEUE[@]} -eq 0 ]] && break
+
+    PASS=$((PASS + 1))
+    if [[ $PASS -gt $MAX_PASSES ]]; then
+      echo ""
+      echo "⚠ Stopped after $MAX_PASSES passes — ${#QUEUE[@]} file(s) staged during the last pass are left for the next run:"
+      for f in "${QUEUE[@]}"; do echo "  - $f"; done
+      break
     fi
+
+    echo ""
+    echo "→ ${#QUEUE[@]} more file(s) staged during this run — pass ${PASS}…"
   done
 
 # ── all mode ─────────────────────────────────────────────────────────────────
@@ -703,7 +757,6 @@ else
     fi
     [[ -z "$local_diff" ]] && continue
 
-    git add -- "$FILE"
     if commit_file "$FILE"; then
       COMMITTED=$((COMMITTED + 1))
     else
@@ -720,4 +773,16 @@ echo "Committed: $COMMITTED file(s)."
 if [[ ${#SKIPPED[@]} -gt 0 ]]; then
   echo "Skipped (${#SKIPPED[@]}):"
   for f in "${SKIPPED[@]}"; do echo "  - $f"; done
+fi
+
+# Never finish quietly on a partial job. Silence after a 40-file batch is what
+# made this dangerous — the batch looked finished while files sat uncommitted.
+LEFTOVER=()
+while IFS= read -r line; do
+  [[ -n "$line" ]] && LEFTOVER+=("$line")
+done < <(git diff --cached --name-only 2>/dev/null)
+
+if [[ ${#LEFTOVER[@]} -gt 0 ]] && ! $DRY_RUN; then
+  echo "⚠ ${#LEFTOVER[@]} file(s) still staged and uncommitted:"
+  for f in "${LEFTOVER[@]}"; do echo "  - $f"; done
 fi
