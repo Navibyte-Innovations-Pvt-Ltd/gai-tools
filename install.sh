@@ -29,7 +29,12 @@ _gai_watch_start() {
   if [[ -f "$pidfile" ]]; then
     local pid
     pid=$(awk '"'"'{print $1}'"'"' "$pidfile" 2>/dev/null)
-    kill -0 "$pid" 2>/dev/null && return
+    # Confirm the PID is really a gai-watch — a recycled PID otherwise makes a
+    # dead watcher look alive forever, which is how issue #28 went unnoticed.
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null &&
+       ps -p "$pid" -o command= 2>/dev/null | grep -q gai-watch; then
+      return
+    fi
     rm -f "$pidfile"
   fi
   local repo_hash
@@ -38,11 +43,20 @@ _gai_watch_start() {
   echo "$! $repo" > "$pidfile"
 }
 
-chpwd() {
+# add-zsh-hook, not a bare chpwd() — a bare definition clobbers any chpwd the
+# user already has. The guard keeps non-interactive shells (scripts, CI, agent
+# shells) quiet: they get chpwd without the function and printed
+# "chpwd:3: command not found: _gai_watch_start" on every cd.
+autoload -Uz add-zsh-hook 2>/dev/null
+_gai_chpwd_hook() {
+  (( $+functions[_gai_watch_start] )) || return
   if git rev-parse --git-dir > /dev/null 2>&1; then
     _gai_watch_start
   fi
 }
+if (( $+functions[add-zsh-hook] )); then
+  add-zsh-hook chpwd _gai_chpwd_hook
+fi
 
 _gai_watch_start  # start for initial shell directory
 # end gai-tools'
@@ -128,10 +142,14 @@ fi
 
 # ── add/update zshrc hook (idempotent, upgrades old format) ──────────────────
 
+# Bump HOOK_MARKER whenever GAI_WATCH_HOOK changes — it is what tells an existing
+# install that its block is out of date. Without it, upgrades silently keep the
+# old hook (e.g. the bare chpwd() that clobbered user hooks and errored in
+# non-interactive shells).
+HOOK_MARKER="_gai_chpwd_hook"
+
 if grep -q "gai-tools:" "$ZSHRC" 2>/dev/null; then
-  # Update hook if it uses old pidfile format (single PID, no repo path stored)
-  # shellcheck disable=SC2016
-  if grep -q 'echo $! > "$pidfile"' "$ZSHRC" 2>/dev/null; then
+  if ! grep -q "$HOOK_MARKER" "$ZSHRC" 2>/dev/null; then
     echo "→ Updating zshrc hook to new format…"
     python3 - <<PYEOF
 import re, sys
@@ -206,7 +224,10 @@ if git rev-parse --git-dir > /dev/null 2>&1; then
   CURR_RUNNING=false
   if [[ -f "$CURR_PID" ]]; then
     CURR_OLD=$(awk '{print $1}' "$CURR_PID" 2>/dev/null)
-    kill -0 "$CURR_OLD" 2>/dev/null && CURR_RUNNING=true
+    if [[ -n "$CURR_OLD" ]] && kill -0 "$CURR_OLD" 2>/dev/null &&
+       ps -p "$CURR_OLD" -o command= 2>/dev/null | grep -q gai-watch; then
+      CURR_RUNNING=true
+    fi
   fi
   if [[ "$CURR_RUNNING" == "false" ]]; then
     (cd "$CURR_REPO" && gai-watch > "/tmp/gai-watch-${CURR_HASH}.log" 2>&1 &
@@ -228,7 +249,12 @@ if [[ -f "$VSCODE_STORAGE" ]]; then
     pidfile="/tmp/gai-watch-${repo_hash}.pid"
     if [[ -f "$pidfile" ]]; then
       pid=$(awk '{print $1}' "$pidfile" 2>/dev/null)
-      kill -0 "$pid" 2>/dev/null && continue
+      # Same recycled-PID guard as _gai_watch_start: `kill -0` alone would let a
+      # dead watcher's PID number, reused by anything else, block the restart.
+      if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null &&
+         ps -p "$pid" -o command= 2>/dev/null | grep -q gai-watch; then
+        continue
+      fi
       rm -f "$pidfile"
     fi
     (
