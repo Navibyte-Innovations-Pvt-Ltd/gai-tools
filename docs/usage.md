@@ -64,4 +64,13 @@ Available models (pull first with `ollama pull <name>`):
 - Files with no staged diff
 - Files where model returns empty message
 
-These files are unstaged and left for you to handle.
+In the default (staged) mode these files **stay staged** and are named at the end
+of the run, so nothing loses its staged state:
+
+```
+⚠ 1 file(s) still staged and uncommitted:
+  - app.env
+```
+
+Commit them yourself, or rename the file if the secret match was a false positive.
+In `--all` mode they are left unstaged instead, since nothing had staged them.
