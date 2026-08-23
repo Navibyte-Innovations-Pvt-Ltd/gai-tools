@@ -33,8 +33,10 @@ if ! git rev-parse --git-dir > /dev/null 2>&1; then
 fi
 
 GIT_DIR=$(git rev-parse --git-dir)
-INDEX="$GIT_DIR/index"
+[[ "$GIT_DIR" != /* ]] && GIT_DIR="$PWD/$GIT_DIR"
 REPO_ROOT=$(git rev-parse --show-toplevel)
+REPO_HASH=$(echo "$REPO_ROOT" | md5)
+PID_FILE="/tmp/gai-watch-${REPO_HASH}.pid"
 
 _prune_watch_logs
 LOG_FILE="$LOG_DIR/$(date +%Y-%m-%d).watch.log"
@@ -42,12 +44,45 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 
 echo "── gai-watch $(date '+%Y-%m-%d %H:%M:%S') repo:$REPO_ROOT ──"
 
-# Watch targets: parent index + .git/modules/ (catches submodule staging even if
-# submodules are added after gai-watch starts). Submodule repos are re-enumerated
-# dynamically on each trigger so new submodules are picked up without a restart.
-WATCH_TARGETS=("$INDEX")
-MODULES_DIR="$GIT_DIR/modules"
-[[ -d "$MODULES_DIR" ]] && WATCH_TARGETS+=("$MODULES_DIR")
+# Own the PID file. Previously only `gai` and the .zshrc hook wrote it, using the
+# background job's $!, so a hand-started watcher left none and got duplicated. A
+# stale file also made the auto-start hook believe a dead watcher was alive.
+echo "$$ $REPO_ROOT" > "$PID_FILE"
+
+# Never exit quietly: the failure mode in issue #28 was total silence in the log,
+# which is why a dead watcher went unnoticed for over an hour.
+_on_exit() {
+  local code=$?
+  echo "$(date '+%H:%M:%S') gai-watch exiting (code $code) repo:$REPO_ROOT"
+  if [[ -f "$PID_FILE" ]] && [[ "$(awk '{print $1}' "$PID_FILE" 2>/dev/null)" == "$$" ]]; then
+    rm -f "$PID_FILE"
+  fi
+}
+trap _on_exit EXIT
+
+# Shut down the watch pipeline explicitly. Bash defers a trap until the current
+# foreground command returns, and the fswatch pipeline never returns — so INT and
+# TERM would sit queued forever and the exit line above would never print.
+# `wait` below is interruptible, and this tears down fswatch with us.
+_shutdown() {
+  local code="$1"
+  if [[ -n "${PIPELINE_PID:-}" ]]; then
+    pkill -P "$PIPELINE_PID" 2>/dev/null || true
+    kill "$PIPELINE_PID" 2>/dev/null || true
+  fi
+  exit "$code"
+}
+trap '_shutdown 130' INT
+trap '_shutdown 143' TERM
+
+# Watch the whole $GIT_DIR (recursive) and filter down to index files rather than
+# watching the $GIT_DIR/index path directly. Git never writes index in place — it
+# writes index.lock and renames it over index — so a path watch is aimed at an
+# inode that is replaced on every single `git add`. The directory watch survives
+# that, and covers .git/modules/<name>/index for free, so submodules added after
+# startup need no restart.
+WATCH_TARGETS=("$GIT_DIR")
+WATCH_FILTERS=(-e '.*' -i '/index$')
 
 # Collect submodule roots for the startup banner only.
 SUBMOD_COUNT=0
@@ -72,9 +107,15 @@ _last_run_file() {
   echo "/tmp/gai-watch-lastrun-${repo_hash}"
 }
 
-fswatch -o --latency "$DEBOUNCE" "${WATCH_TARGETS[@]}" | while read -r _; do
+# One pass over every repo (parent + submodules) for a single fswatch event.
+_handle_trigger() {
+  # Heartbeat: touch the PID file each pass so a wedged watcher is detectable by
+  # age, not only by kill -0.
+  touch "$PID_FILE" 2>/dev/null || true
+
   # Re-enumerate submodules on every trigger so submodules added after startup
   # are handled without restarting gai-watch.
+  local CURRENT_REPOS
   CURRENT_REPOS=("$REPO_ROOT")
   # shellcheck disable=SC2016
   while IFS= read -r submod_path; do
@@ -87,8 +128,8 @@ fswatch -o --latency "$DEBOUNCE" "${WATCH_TARGETS[@]}" | while read -r _; do
     [[ -z "$STAGED" ]] && continue
 
     # Skip while another git process (Claude Code, IDE, user shell) is mid-operation —
-    # racing it here (gai does `git reset` + per-file re-stage) can auto-commit half-
-    # finished work or collide on the index. The next fswatch trigger will retry.
+    # racing it here collides on the index and can auto-commit half-finished work.
+    # The next fswatch trigger will retry.
     repo_git_dir=$(git -C "$repo" rev-parse --git-dir 2>/dev/null) || continue
     [[ "$repo_git_dir" != /* ]] && repo_git_dir="$repo/$repo_git_dir"
     if [[ -f "$repo_git_dir/index.lock" ]]; then
@@ -100,12 +141,32 @@ fswatch -o --latency "$DEBOUNCE" "${WATCH_TARGETS[@]}" | while read -r _; do
     last_run=$(cat "$last_run_f" 2>/dev/null || echo "0")
     NOW=$(date +%s)
     if (( NOW - last_run < 5 )); then
+      echo "$(date '+%H:%M:%S') skip: throttled (<5s since last run) in $(basename "$repo")"
       continue
     fi
     echo "$NOW" > "$last_run_f"
 
     echo "━━━ $(date '+%H:%M:%S') staged: $(echo "$STAGED" | wc -l | tr -d ' ') file(s) in $(basename "$repo") ━━━"
-    (cd "$repo" && gai ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}) || true
+    # stdin comes from /dev/null, never the fswatch pipe: anything gai reads from
+    # an inherited stdin drains that pipe, the read loop below sees EOF, and the
+    # watcher exits 0 with nothing in the log — issue #28's silent death.
+    (cd "$repo" && gai ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} < /dev/null) || true
     echo ""
   done
+}
+
+# Re-arm forever. If fswatch exits for any reason the pipeline closes, the read
+# loop ends, and under `set -euo pipefail` the script would exit 0 in silence.
+# Restart it instead, and say so.
+PIPELINE_PID=""
+while true; do
+  (
+    fswatch -o --latency "$DEBOUNCE" "${WATCH_FILTERS[@]}" "${WATCH_TARGETS[@]}" | while read -r _; do
+      _handle_trigger
+    done
+  ) &
+  PIPELINE_PID=$!
+  wait "$PIPELINE_PID" || true
+  echo "$(date '+%H:%M:%S') fswatch exited — restarting in 2s (repo:$REPO_ROOT)"
+  sleep 2
 done
