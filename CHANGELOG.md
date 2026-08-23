@@ -7,6 +7,36 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) — [Semantic V
 ---
 
 ## [Unreleased]
+### Fixed
+
+- fix(gai-watch): survive a dead `fswatch` and never exit silently — the watch
+  pipeline re-arms after 2 s, an `EXIT` trap logs the exit code, `INT`/`TERM` tear
+  the pipeline down instead of sitting queued behind it, and throttled triggers
+  are logged rather than dropped (#28)
+- fix(gai-watch): own the PID file (`$$`), heartbeat it on every trigger, and
+  remove it on exit — a hand-started watcher previously left none and got
+  duplicated (#28)
+- fix(gai-watch): watch `$GIT_DIR` filtered to `/index$` instead of the
+  `.git/index` path, which git replaces on every `git add`; covers submodule
+  indices for free (#28)
+- fix(gai-watch): run `gai` with stdin from `/dev/null` — an inherited stdin
+  drains the fswatch pipe and ends the watch loop with nothing in the log (#28)
+- fix(gai): stop unstaging the whole index at the start of a run. Each file is
+  committed with a pathspec (`git commit -m … -- <file>`), so files further down
+  the queue keep their staged state and a file staged by another process mid-run
+  is never swept into another file's commit under the wrong message (#29)
+- fix(gai): re-scan the index when a run finishes and start another pass for
+  anything staged while it was busy, up to 5 passes (#29)
+- fix(gai): name anything left staged at the end of a run instead of finishing in
+  silence (#29)
+- fix(gai, install): confirm a PID really belongs to a gai-watch before trusting
+  it — a recycled PID made a dead watcher look alive forever (#28)
+- fix(install): register the auto-start hook with `add-zsh-hook` instead of
+  defining a bare `chpwd()`, which clobbered any user `chpwd` and printed
+  `chpwd:3: command not found: _gai_watch_start` on every `cd` in a
+  non-interactive shell. `HOOK_MARKER` makes existing installs pick up the new
+  block (#28)
+
 ### Added
 
 - feat(gai): add `gai pr` subcommand — branch guard + Ollama-generated title/body + `gh pr create`

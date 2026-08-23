@@ -20,7 +20,7 @@ git describe --tags
 
 **Relevant logs:**
 ```bash
-cat /tmp/gai-watch.log
+cat ~/.gai/logs/$(date +%F).watch.log
 ```
 
 **Ollama status:**

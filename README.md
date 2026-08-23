@@ -80,9 +80,9 @@ Shell opens in a git repo
       ↓
 You stage files (VS Code or git add)
       ↓
-fswatch detects .git/index change
+fswatch detects an index write under .git/
       ↓
-gai: unstages all → re-stages + commits each file individually
+gai: commits each staged file individually (pathspec-limited, one file per commit)
       ↓
 Ollama generates conventional commit message per file
       ↓
@@ -115,7 +115,7 @@ See [docs/troubleshooting.md](docs/troubleshooting.md).
 
 **Quick checks:**
 ```bash
-cat /tmp/gai-watch.log   # watcher log
+cat ~/.gai/logs/$(date +%F).watch.log   # watcher log
 gai --dry-run            # test manually
 ollama serve             # if Ollama not running
 ```
