@@ -61,10 +61,16 @@ Anything still staged at the end is named in the run's own output:
   - prisma/schema.prisma
 ```
 
-Files listed there were skipped on purpose — a secret-looking path
-(`.env`, `credentials`, `*.key`), an empty staged diff, or a failed commit. They
-stay staged; commit them yourself or rename the file if the secret match was a
-false positive.
+Files listed there were skipped on purpose — a secret filename (`.env`,
+`*.key`, `credentials.json`), a live credential prefix found in the added lines,
+an empty staged diff, or a failed commit. Every secret skip prints *why* it was
+flagged and the exact command to override it. See
+[What gai Skips](usage.md#what-gai-skips).
+
+Directory names are not matched: a path containing `credentials/` or `secrets/`
+commits normally. If gai is still wrong about a file, commit it with
+`gai --force`, or add `allow=<glob>` to `<repo>/.gairc` so `gai-watch` stops
+retrying it too.
 
 ## Multiple watchers running
 
