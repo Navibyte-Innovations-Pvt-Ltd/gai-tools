@@ -36,7 +36,10 @@ One commit per file. Conventional format.
 - Calls Ollama at `http://localhost:11434/api/generate`
 - Uses `python3` for safe JSON encoding (always on macOS)
 - Two modes: `staged` (default), `all`
-- Skips secret files, missing files, empty diffs
+- Skips secret files, missing files, empty diffs. Secret detection is two gates:
+  basename match (`.env`, `*.pem`, `credentials.json` — never a directory name)
+  and a scan of the added lines for known provider key prefixes. Both are
+  overridable via `--force`, `GAI_ALLOW_PATHS`, or `allow=` lines in `.gairc`
 
 ### `gai-watch` (`~/.local/bin/gai-watch`)
 
