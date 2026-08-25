@@ -56,6 +56,7 @@ The installer handles everything: Homebrew check, `fswatch`, `ollama`, model dow
 | `gai` | Commit staged files one by one |
 | `gai --all` | Commit all dirty files |
 | `gai --dry-run` | Preview messages without committing |
+| `gai --force` | Commit even if a file trips the secret check |
 | `gai update` | Update to latest release from GitHub |
 | `gai-watch` | Start watcher manually |
 | `gai-watch --dry-run` | Watch + preview only |
@@ -68,6 +69,17 @@ export GAI_MODEL=qwen2.5-coder:7b   # use a larger model
 ```
 
 Default: `qwen2.5-coder:1.5b` (~200ms on Apple Silicon)
+
+### Secret files
+
+`gai` refuses to commit a file whose **name** is a secret store (`.env`,
+`*.pem`, `credentials.json`) or whose **added lines** contain a live credential
+prefix (`AKIA…`, `ghp_…`, a PEM private-key header). Directory names are not
+matched — a path containing `credentials/` commits normally.
+
+Override a false positive with `gai --force`, `export GAI_ALLOW_PATHS='<glob>:<glob>'`,
+or `allow=<glob>` lines in a repo-root `.gairc` (the only override `gai-watch`
+can see). Details: [docs/usage.md](docs/usage.md#what-gai-skips)
 
 ---
 
