@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # gai — AI git commit using local Ollama (qwen2.5-coder:1.5b)
-# Usage: gai [--all] [--dry-run] [--version] [--logs]
+# Usage: gai [--all] [--dry-run] [--force] [--version] [--logs]
 #
 #   Default (no flags): commit STAGED files one by one
 #   --all              : commit ALL dirty files one by one
 #   --dry-run          : print messages, don't commit
+#   --force            : skip the secret checks for this run
 #   --version          : print installed gai-tools version
 #   --logs             : show last 24 h of activity
 
@@ -13,6 +14,7 @@ set -euo pipefail
 MODEL="${GAI_MODEL:-qwen2.5-coder:1.5b}"
 OLLAMA_URL="http://localhost:11434/api/generate"
 DRY_RUN=false
+FORCE=false
 MODE="staged"
 LOG_DIR="${GAI_LOG_DIR:-$HOME/.gai/logs}"
 
@@ -152,6 +154,7 @@ for arg in "$@"; do
   case "$arg" in
     --dry-run|-n) DRY_RUN=true ;;
     --all)        MODE="all" ;;
+    --force|-f)   FORCE=true ;;
     --version|-v)
       echo "gai v$(cat "$HOME/.gai/version" 2>/dev/null || echo "unknown")"
       exit 0
@@ -228,10 +231,11 @@ for arg in "$@"; do
       exit 0
       ;;
     --help|-h)
-      echo "Usage: gai [--all] [--dry-run] [--version] [--logs] [update] [pr] [issue <url>] [pause] [resume] [remove]"
+      echo "Usage: gai [--all] [--dry-run] [--force] [--version] [--logs] [update] [pr] [issue <url>] [pause] [resume] [remove]"
       echo "  Default      : commit staged files one by one (AI message per file)"
       echo "  --all        : commit all dirty files instead of staged"
       echo "  --dry-run    : show messages without committing"
+      echo "  --force      : commit even if a file trips the secret check"
       echo "  --version    : print installed gai-tools version"
       echo "  --logs       : show last 24 h of activity (\$GAI_LOG_DIR)"
       echo "  update       : pull latest version from GitHub"
@@ -242,6 +246,7 @@ for arg in "$@"; do
       echo "  remove       : uninstall gai/gai-watch (alias: uninstall)"
       echo ""
       echo "Model: \$GAI_MODEL (default: $MODEL)"
+      echo "Secret allowlist: \$GAI_ALLOW_PATHS (colon-separated globs) or 'allow=<glob>' lines in <repo>/.gairc"
       echo "Requires: ollama running + model pulled"
       echo "  brew install ollama && ollama pull $MODEL"
       exit 0
@@ -420,6 +425,16 @@ if ! git rev-parse --git-dir > /dev/null 2>&1; then
 fi
 
 GIT_DIR=$(git rev-parse --git-dir 2>/dev/null)
+
+# Every path we handle from here on is repo-root-relative (that is what
+# `git diff --name-only` emits, and what allowlist globs are written against),
+# so run from the root. Called from a subdirectory those paths resolved against
+# the wrong base and nothing committed at all.
+GIT_TOPLEVEL=$(git rev-parse --show-toplevel 2>/dev/null || true)
+if [[ -n "$GIT_TOPLEVEL" ]]; then
+  cd "$GIT_TOPLEVEL" || exit 1
+fi
+
 if [[ -f "$GIT_DIR/MERGE_HEAD" ]] || git status --short | grep -qE '^(UU|AA|DD|AU|UA|UD|DU) '; then
   echo "⏸  Merge in progress with unresolved conflicts — refusing to auto-commit." >&2
   echo "   Resolve conflicts, 'git add' the files, then commit manually." >&2
@@ -507,10 +522,127 @@ _acquire_lock
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
+# ── secret detection ─────────────────────────────────────────────────────────
+# Two independent gates, both narrow on purpose:
+#   1. filename  — only names that ARE a secret store (.env, *.pem, id_rsa …).
+#      Directory names never count: `app/api/client-credentials/route.ts` is
+#      ordinary source, and matching the whole path made gai unusable there.
+#   2. content   — high-confidence vendor key prefixes in the ADDED lines. This
+#      is what actually stops a leak; a path never could.
+# Both are overridable via GAI_ALLOW_PATHS, .gairc, or --force.
+
+_SECRET_REASON=""
+
+# Repo-relative globs that are never flagged. Sources, in order:
+#   GAI_ALLOW_PATHS  colon-separated globs
+#   <repo>/.gairc    `allow=<glob>` lines (read line by line — NEVER sourced,
+#                    this runs unattended from gai-watch)
+_ALLOW_GLOBS=()
+_ALLOW_LOADED=false
+
+_load_allow_globs() {
+  $_ALLOW_LOADED && return 0
+  _ALLOW_LOADED=true
+
+  local _ifs_save="$IFS" g root line
+  IFS=':'
+  for g in ${GAI_ALLOW_PATHS:-}; do
+    [[ -n "$g" ]] && _ALLOW_GLOBS+=("$g")
+  done
+  IFS="$_ifs_save"
+
+  root=$(git rev-parse --show-toplevel 2>/dev/null || true)
+  [[ -z "$root" || ! -f "$root/.gairc" ]] && return 0
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%%#*}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -z "$line" ]] && continue
+    case "$line" in
+      allow=*) _ALLOW_GLOBS+=("${line#allow=}") ;;
+    esac
+  done < "$root/.gairc"
+}
+
+_path_allowed() {
+  local f="$1" g
+  _load_allow_globs
+  for g in ${_ALLOW_GLOBS+"${_ALLOW_GLOBS[@]}"}; do
+    # shellcheck disable=SC2053  # glob match is the point
+    [[ "$f" == $g ]] && return 0
+  done
+  return 1
+}
+
+# Flag ONLY on the basename. Sets _SECRET_REASON when it returns 0.
 is_secret() {
-  local f="$1"
-  [[ "$f" == *".env"* || "$f" == *"credentials"* || "$f" == *"secret"* || \
-     "$f" == *".key"  || "$f" == *"id_rsa"*       || "$f" == *"id_ed25519"* ]]
+  local f="$1" base
+  _SECRET_REASON=""
+  $FORCE && return 1
+  _path_allowed "$f" && return 1
+
+  base="${f##*/}"
+
+  # Committed on purpose — templates carry placeholders, not values. Their
+  # added lines still go through the content scan below.
+  case "$base" in
+    .env.example|.env.sample|.env.template|*.env.example|*.env.sample|*.env.template)
+      return 1 ;;
+  esac
+
+  case "$base" in
+    .env|.env.*|*.env)
+      _SECRET_REASON="filename '$base' is an environment file" ;;
+    id_rsa|id_dsa|id_ecdsa|id_ed25519|*.pem|*.key|*.p8|*.p12|*.pfx|*.jks|*.keystore|*.asc|*.gpg)
+      _SECRET_REASON="filename '$base' looks like a private key or keystore" ;;
+    credentials|credentials.json|credentials.yml|credentials.yaml|secrets.json|secrets.yml|secrets.yaml|*.secret|.netrc|.pgpass|.htpasswd|service-account*.json)
+      _SECRET_REASON="filename '$base' is a known credential store" ;;
+  esac
+
+  [[ -n "$_SECRET_REASON" ]]
+}
+
+# Scan the ADDED lines of a file's diff for real key material. Only prefixes issued by
+# a known provider block a commit — no entropy heuristics, no `password = "…"`
+# guessing. A fuzzy rule here would recreate the exact false-positive problem
+# this replaced, one layer down.
+scan_diff_secrets() {
+  local file="$1" diff="$2" added hit
+  _SECRET_REASON=""
+  $FORCE && return 1
+  _path_allowed "$file" && return 1
+
+  added=$(printf '%s\n' "$diff" | grep '^+' | grep -v '^+++' || true)
+  [[ -z "$added" ]] && return 1
+
+  hit=$(printf '%s\n' "$added" | grep -oE \
+    -e '-----BEGIN [A-Z ]*PRIVATE KEY-----' \
+    -e 'AKIA[0-9A-Z]{16}' \
+    -e 'ASIA[0-9A-Z]{16}' \
+    -e 'sk-[A-Za-z0-9_-]{24,}' \
+    -e 'sk-ant-[A-Za-z0-9_-]{24,}' \
+    -e 'ghp_[A-Za-z0-9]{36}' \
+    -e 'gho_[A-Za-z0-9]{36}' \
+    -e 'github_pat_[A-Za-z0-9_]{40,}' \
+    -e 'xox[baprs]-[A-Za-z0-9-]{12,}' \
+    -e 'AIza[0-9A-Za-z_-]{35}' \
+    -e 'glpat-[A-Za-z0-9_-]{20,}' \
+    -e 'npm_[A-Za-z0-9]{36}' \
+    -e 'pypi-[A-Za-z0-9_-]{32,}' \
+    -e 'AC[0-9a-f]{32}' \
+    2>/dev/null | head -1 || true)
+
+  [[ -z "$hit" ]] && return 1
+  _SECRET_REASON="added line contains '${hit:0:12}…' — looks like a live credential"
+  return 0
+}
+
+_secret_skip() {
+  local file="$1"
+  echo "  ⚠ skip (secret): $file"
+  echo "      why: ${_SECRET_REASON}"
+  echo "      commit anyway: gai --force   |   always allow: echo 'allow=$file' >> .gairc"
 }
 
 # Deterministic short scope derived from a file path — used both as a prompt
@@ -610,8 +742,9 @@ _sanitize_message() {
 commit_file() {
   local file="$1"
 
+  # Name check runs BEFORE `git add` so a real secret is never staged by us.
   if is_secret "$file"; then
-    echo "  ⚠ skip (secret): $file"
+    _secret_skip "$file"
     return 1
   fi
 
@@ -626,6 +759,12 @@ commit_file() {
   diff=$(git diff --no-ext-diff --cached -- "$file")
   if [[ -z "$diff" ]]; then
     echo "  (empty staged diff — skipping)"
+    return 1
+  fi
+
+  # Content check — the added lines are the only place a leak can actually be.
+  if scan_diff_secrets "$file" "$diff"; then
+    _secret_skip "$file"
     return 1
   fi
 
@@ -731,7 +870,7 @@ else
   while IFS= read -r line; do
     local_file=$(echo "$line" | awk '{print $2}')
     [[ -n "$local_file" ]] && FILES+=("$local_file")
-  done < <(git status --short)
+  done < <(git -c status.relativePaths=false status --short)
 
   if [[ ${#FILES[@]} -eq 0 ]]; then
     echo "Working tree is clean. Nothing to commit."
@@ -742,13 +881,7 @@ else
 
   COMMITTED=0 SKIPPED=()
   for FILE in "${FILES[@]}"; do
-    if is_secret "$FILE"; then
-      echo "  ⚠ skip (secret): $FILE"
-      SKIPPED+=("$FILE")
-      continue
-    fi
-
-    local_status=$(git status --short -- "$FILE" | awk '{print $1}')
+    local_status=$(git -c status.relativePaths=false status --short -- "$FILE" | awk '{print $1}')
     local_diff=""
     if [[ "$local_status" == "??" ]]; then
       local_diff=$(git diff --no-ext-diff --no-index /dev/null "$FILE" 2>/dev/null || true)
