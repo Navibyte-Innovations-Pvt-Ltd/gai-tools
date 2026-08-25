@@ -7,7 +7,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) — [Semantic V
 ---
 
 ## [Unreleased]
+### Added
+
+- feat(gai): `--force` flag plus a `GAI_ALLOW_PATHS` env glob list and `allow=<glob>`
+  lines in a repo-root `.gairc` to override the secret check. `.gairc` is read line
+  by line, never `source`d, and is the only override `gai-watch` can see (#31)
+- feat(gai): scan the added lines of each diff for known provider key prefixes
+  (`AKIA`, `sk-`, `ghp_`, `github_pat_`, `xox?-`, `AIza`, `glpat-`, `npm_`,
+  `pypi-`, PEM headers). No entropy heuristics, so ordinary fixtures still
+  commit (#31)
+
 ### Fixed
+
+- fix(gai): match secret filenames on the **basename**, not a substring of the whole
+  path — a directory named `client-credentials/` or `secrets/` no longer blocks every
+  source file beneath it. `.env.example`/`.sample`/`.template` now commit too, and
+  every skip prints why it was flagged and the exact command to override it (#31)
+- fix(gai): run from the repository root. Invoked from a subdirectory, the
+  root-relative paths git hands back were resolved against the wrong base and
+  nothing committed at all (#31)
 
 - fix(gai-watch): survive a dead `fswatch` and never exit silently — the watch
   pipeline re-arms after 2 s, an `EXIT` trap logs the exit code, `INT`/`TERM` tear
