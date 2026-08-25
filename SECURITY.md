@@ -27,6 +27,13 @@ Response within 48 hours. If confirmed, a patch will be released and you'll be c
 
 - Scripts install to `~/.local/bin/` — no system-level writes, no `sudo` required
 - Ollama runs locally — diffs never leave your machine
-- Secret file detection skips `.env*`, `credentials`, `secret`, `.key`, `id_rsa`, `id_ed25519`
+- Secret detection has two gates: the **basename** (`.env*`, `*.pem`, `*.key`,
+  `id_rsa`, `credentials.json`, `.netrc`, …) and the **added lines** of the diff,
+  scanned for known provider key prefixes (`AKIA`, `sk-`, `ghp_`, `npm_`, PEM
+  headers, …). Directory names are never matched. Both gates are overridable by
+  the user via `gai --force`, `GAI_ALLOW_PATHS`, or `allow=<glob>` lines in a
+  repo-root `.gairc` — see [docs/usage.md](docs/usage.md#what-gai-skips)
+- `.gairc` is read line by line and never `source`d, so a repo cannot execute
+  code through it
 - PID files written to `/tmp/` — no persistent state beyond the running watcher
 - No telemetry, no analytics, no network calls except `localhost:11434`
