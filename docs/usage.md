@@ -14,6 +14,7 @@ gai              # commit staged files one by one
 gai --all        # commit ALL dirty files (staged + unstaged)
 gai --dry-run    # preview messages without committing
 gai update       # update to latest release from GitHub
+gai issue 123    # same, resolving the repo from the current directory
 gai issue <url>  # attach a GitHub issue to an open PR, then offer a Claude session
 gai-watch        # start watcher manually
 gai-watch --dry-run  # watch + preview only
@@ -22,15 +23,26 @@ gai-watch --dry-run  # watch + preview only
 ## Working an Issue
 
 ```bash
-gai issue https://github.com/owner/repo/issues/123
+gai issue 123                                        # repo from cwd
+gai issue https://github.com/owner/repo/issues/123   # any repo
 ```
 
-Two things happen, in order:
+A bare number (or `#123`) resolves against the repo you are standing in, via
+`gh repo view`. A full URL works from anywhere.
 
-1. **Attach.** `gai` lists the open PRs on that repo, auto-picks the only one or
-   shows an arrow-key menu, and appends `Closes #123` to its body. If the issue is
-   already referenced it says so and moves on — it does not stop.
-2. **Offer a Claude session.** It asks `Start a Claude session on issue #123 with
+Three things happen, in order:
+
+1. **Make sure a PR exists.** If the repo has no open PR, `gai` asks
+   `Create one now? [Y/n]` and runs the full `gai pr` flow — push the branch,
+   AI-generate title and body, open the PR — then picks it up. Answer `n` and it
+   skips the attach and goes straight to step 3. Creating requires you to be
+   standing in that same repo; a URL for a different repo stops with an error
+   telling you where to `cd`. If `gai pr` itself fails (on `main`, nothing to push,
+   Ollama down) the command aborts — fix the blocker and re-run.
+2. **Attach.** `gai` lists the open PRs, auto-picks the only one or shows an
+   arrow-key menu, and appends `Closes #123` to its body. If the issue is already
+   referenced it says so and moves on — it does not stop.
+3. **Offer a Claude session.** It asks `Start a Claude session on issue #123 with
    full context? [Y/n]`. Answer yes and it pulls the issue's title, labels,
    description and every comment through `gh`, then prompts for one optional line
    of extra instructions. It builds a single prompt out of all of it and `exec`s
@@ -42,11 +54,12 @@ re-running the command is how you start work on an issue you linked yesterday.
 
 Flags and edge cases:
 
-- `--dry-run` prints the composed prompt and exits instead of launching Claude.
+- `--dry-run` makes **no GitHub writes at all** — it never opens a PR, never edits a
+  PR body, and prints the composed prompt instead of launching Claude.
 - Answering `n` skips the session; the attach already happened.
 - No TTY (piped or scripted) skips the offer and prints the manual command.
 - No `claude` on `PATH` skips the offer silently.
-- No open PRs in the repo skips the attach but still offers the session.
+- Declining PR creation skips the attach but still offers the session.
 
 ## Commit Format
 
