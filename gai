@@ -106,7 +106,7 @@ _gai_issue_claude_session() {
       "## Description",
       ((.body // "") | if . == "" then "(no description)" else . end),
       ((.comments // []) | if length == 0 then empty else ("", "## Comments", (.[] | "--- @\(.author.login // "unknown") ---\n\(.body // "")")) end)
-    ')
+    ' || true)
 
   if [[ -z "$_issue_ctx" ]]; then
     echo "error: could not fetch issue #${_issue_num} from ${_issue_repo}." >&2
@@ -140,7 +140,7 @@ ${_extra}"
 }
 
 if [[ "${1:-}" == "issue" ]]; then
-  _issue_url=""
+  _issue_arg=""
   _issue_dry_run=false
 
   shift
@@ -152,24 +152,15 @@ if [[ "${1:-}" == "issue" ]]; then
         exit 1
         ;;
       *)
-        if [[ -z "$_issue_url" ]]; then
-          _issue_url="$_arg"
+        if [[ -z "$_issue_arg" ]]; then
+          _issue_arg="$_arg"
         fi
         ;;
     esac
   done
 
-  if [[ -z "$_issue_url" ]]; then
-    echo "Usage: gai issue <github-issue-url> [--dry-run]" >&2
-    exit 1
-  fi
-
-  _issue_num=$(echo "$_issue_url" | grep -oE '/issues/[0-9]+' | grep -oE '[0-9]+')
-  _issue_repo=$(echo "$_issue_url" | grep -oE 'github\.com/[^/]+/[^/]+' | sed 's|github\.com/||')
-
-  if [[ -z "$_issue_num" || -z "$_issue_repo" ]]; then
-    echo "error: invalid GitHub issue URL: $_issue_url" >&2
-    echo "  Expected: https://github.com/owner/repo/issues/123" >&2
+  if [[ -z "$_issue_arg" ]]; then
+    echo "Usage: gai issue <issue-number|github-issue-url> [--dry-run]" >&2
     exit 1
   fi
 
@@ -184,6 +175,33 @@ if [[ "${1:-}" == "issue" ]]; then
     exit 1
   fi
 
+  # A bare number (or "#123") means "the issue in the repo I'm standing in".
+  if [[ "$_issue_arg" =~ ^#?[0-9]+$ ]]; then
+    _issue_num="${_issue_arg#\#}"
+    _issue_repo=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || true)
+
+    if [[ -z "$_issue_repo" ]]; then
+      echo "error: 'gai issue $_issue_arg' needs a GitHub repo in the current directory." >&2
+      echo "  cd into the repo, or pass the full issue URL." >&2
+      exit 1
+    fi
+
+    _issue_url="https://github.com/${_issue_repo}/issues/${_issue_num}"
+    echo "→ Resolved #${_issue_num} → ${_issue_repo}"
+  else
+    _issue_url="$_issue_arg"
+    # || true: set -e would otherwise abort on a non-matching grep before the
+    # friendly error below ever prints.
+    _issue_num=$(echo "$_issue_url" | grep -oE '/issues/[0-9]+' | grep -oE '[0-9]+' || true)
+    _issue_repo=$(echo "$_issue_url" | grep -oE 'github\.com/[^/]+/[^/]+' | sed 's|github\.com/||' || true)
+
+    if [[ -z "$_issue_num" || -z "$_issue_repo" ]]; then
+      echo "error: invalid GitHub issue reference: $_issue_arg" >&2
+      echo "  Expected: 123  or  https://github.com/owner/repo/issues/123" >&2
+      exit 1
+    fi
+  fi
+
   echo "→ Fetching open PRs for ${_issue_repo}…"
 
   _pr_list=()
@@ -191,10 +209,61 @@ if [[ "${1:-}" == "issue" ]]; then
     [[ -n "$_line" ]] && _pr_list+=("$_line")
   done < <(gh pr list --repo "$_issue_repo" --state open --json number,title --jq '.[] | "\(.number)|\(.title)"')
 
+  # Nothing to attach to — open a PR first so the issue has a home.
   if [[ ${#_pr_list[@]} -eq 0 ]]; then
-    echo "No open PRs in $_issue_repo — nothing to attach the issue to."
-    _gai_issue_claude_session
-    exit 0
+    echo "No open PRs in ${_issue_repo}."
+
+    # --dry-run must never push a branch or open a PR.
+    if [[ "$_issue_dry_run" == "true" ]]; then
+      echo "dry run: would create a PR via 'gai pr', then attach #${_issue_num} to it."
+      _gai_issue_claude_session
+      exit 0
+    fi
+
+    if [[ ! -t 0 ]]; then
+      echo "error: not a TTY — cannot confirm PR creation. Run 'gai pr' first." >&2
+      exit 1
+    fi
+
+    read -rp "Create one now? [Y/n] " _mk_pr
+    case "$_mk_pr" in
+      [Nn]*)
+        echo "Skipped PR creation — issue #${_issue_num} not attached."
+        _gai_issue_claude_session
+        exit 0
+        ;;
+    esac
+
+    _cwd_repo=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || true)
+
+    if [[ -z "$_cwd_repo" ]]; then
+      echo "error: not inside a GitHub repository — cd into ${_issue_repo} and re-run." >&2
+      exit 1
+    fi
+
+    if [[ "$_cwd_repo" != "$_issue_repo" ]]; then
+      echo "error: you are in ${_cwd_repo}, but issue #${_issue_num} lives in ${_issue_repo}." >&2
+      echo "  cd into ${_issue_repo} and re-run." >&2
+      exit 1
+    fi
+
+    if ! "$0" pr; then
+      echo "error: PR creation failed — issue #${_issue_num} not attached." >&2
+      exit 1
+    fi
+
+    echo ""
+    echo "→ Re-fetching open PRs for ${_issue_repo}…"
+
+    _pr_list=()
+    while IFS= read -r _line; do
+      [[ -n "$_line" ]] && _pr_list+=("$_line")
+    done < <(gh pr list --repo "$_issue_repo" --state open --json number,title --jq '.[] | "\(.number)|\(.title)"')
+
+    if [[ ${#_pr_list[@]} -eq 0 ]]; then
+      echo "error: PR created but it is not showing up in the open-PR list." >&2
+      exit 1
+    fi
   fi
 
   _pr_num=""
@@ -221,6 +290,8 @@ if [[ "${1:-}" == "issue" ]]; then
 
   if echo "$_pr_body" | grep -qE "#${_issue_num}([^0-9]|$)"; then
     echo "Issue #$_issue_num already referenced in PR #$_pr_num."
+  elif [[ "$_issue_dry_run" == "true" ]]; then
+    echo "dry run: would add \"Closes #${_issue_num}\" to PR #${_pr_num}."
   else
     gh pr edit "$_pr_num" --repo "$_issue_repo" --body "${_pr_body}
 Closes #${_issue_num}"
@@ -314,7 +385,7 @@ for arg in "$@"; do
       exit 0
       ;;
     --help|-h)
-      echo "Usage: gai [--all] [--dry-run] [--force] [--version] [--logs] [update] [pr] [issue <url>] [pause] [resume] [remove]"
+      echo "Usage: gai [--all] [--dry-run] [--force] [--version] [--logs] [update] [pr] [issue <n|url>] [pause] [resume] [remove]"
       echo "  Default      : commit staged files one by one (AI message per file)"
       echo "  --all        : commit all dirty files instead of staged"
       echo "  --dry-run    : show messages without committing"
@@ -323,8 +394,9 @@ for arg in "$@"; do
       echo "  --logs       : show last 24 h of activity (\$GAI_LOG_DIR)"
       echo "  update       : pull latest version from GitHub"
       echo "  pr           : create a GitHub PR from current branch (requires gh CLI)"
-      echo "  issue <url>  : attach a GitHub issue to an open PR, then offer to start a"
-      echo "                 Claude session seeded with the full issue thread"
+      echo "  issue <n|url>: attach a GitHub issue to an open PR (creates one if none open),"
+      echo "                 then offer a Claude session seeded with the full issue thread."
+      echo "                 A bare number resolves against the repo you are standing in."
       echo "  pause        : stop auto-commit (gai pr / gai issue keep working)"
       echo "  resume       : re-enable auto-commit after 'gai pause'"
       echo "  remove       : uninstall gai/gai-watch (alias: uninstall)"
