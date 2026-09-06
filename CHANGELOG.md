@@ -9,6 +9,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) — [Semantic V
 ## [Unreleased]
 ### Added
 
+- feat(gai): `gai issue` accepts a bare issue number (`gai issue 1677`) and resolves
+  the repo from the current directory via `gh repo view`. Full URLs still work from
+  anywhere
+- feat(gai): when the repo has no open PR, `gai issue` offers to create one and runs
+  the `gai pr` flow, then attaches the issue to the PR it just made. Creating requires
+  you to be standing in the issue's repo; a `gai pr` failure aborts rather than
+  attaching to nothing. `gai issue --dry-run` makes no GitHub writes — it neither
+  opens a PR nor edits a PR body
 - feat(gai): `gai issue <url>` now offers to start a Claude session seeded with the
   full issue thread — title, labels, description and every comment — plus one
   optional line of extra instructions, then `exec`s `claude` in the current repo.
@@ -25,6 +33,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) — [Semantic V
   commit (#31)
 
 ### Fixed
+
+- fix(gai): an invalid issue reference printed nothing and exited 1 — `set -e` aborted
+  on the non-matching `grep` before the error message ran
 
 - fix(gai): match secret filenames on the **basename**, not a substring of the whole
   path — a directory named `client-credentials/` or `secrets/` no longer blocks every
