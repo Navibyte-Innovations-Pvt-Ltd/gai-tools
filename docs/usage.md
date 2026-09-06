@@ -14,9 +14,39 @@ gai              # commit staged files one by one
 gai --all        # commit ALL dirty files (staged + unstaged)
 gai --dry-run    # preview messages without committing
 gai update       # update to latest release from GitHub
+gai issue <url>  # attach a GitHub issue to an open PR, then offer a Claude session
 gai-watch        # start watcher manually
 gai-watch --dry-run  # watch + preview only
 ```
+
+## Working an Issue
+
+```bash
+gai issue https://github.com/owner/repo/issues/123
+```
+
+Two things happen, in order:
+
+1. **Attach.** `gai` lists the open PRs on that repo, auto-picks the only one or
+   shows an arrow-key menu, and appends `Closes #123` to its body. If the issue is
+   already referenced it says so and moves on — it does not stop.
+2. **Offer a Claude session.** It asks `Start a Claude session on issue #123 with
+   full context? [Y/n]`. Answer yes and it pulls the issue's title, labels,
+   description and every comment through `gh`, then prompts for one optional line
+   of extra instructions. It builds a single prompt out of all of it and `exec`s
+   `claude` in the current directory — so the session starts in your repo, already
+   holding the whole thread. No pasting the URL and waiting for Claude to fetch it.
+
+The offer fires on **every** run, including when the issue is already attached, so
+re-running the command is how you start work on an issue you linked yesterday.
+
+Flags and edge cases:
+
+- `--dry-run` prints the composed prompt and exits instead of launching Claude.
+- Answering `n` skips the session; the attach already happened.
+- No TTY (piped or scripted) skips the offer and prints the manual command.
+- No `claude` on `PATH` skips the offer silently.
+- No open PRs in the repo skips the attach but still offers the session.
 
 ## Commit Format
 
