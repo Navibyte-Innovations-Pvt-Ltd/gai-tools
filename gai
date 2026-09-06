@@ -74,11 +74,93 @@ _gai_select_menu() {
 
 # ── issue subcommand ──────────────────────────────────────────────────────────
 
+# Compose the full issue thread (title, labels, body, comments) into a prompt and
+# hand it to an interactive Claude session, so the user never re-types the URL.
+_gai_issue_claude_session() {
+  if ! command -v claude > /dev/null 2>&1; then
+    return 0
+  fi
+
+  if [[ ! -t 0 ]]; then
+    echo "Not a TTY — skipping Claude session offer."
+    echo "  Run manually: claude \"$_issue_url\""
+    return 0
+  fi
+
+  echo ""
+  read -rp "Start a Claude session on issue #${_issue_num} with full context? [Y/n] " _claude_confirm
+  case "$_claude_confirm" in
+    [Nn]*)
+      echo "Skipped. Re-run any time: gai issue $_issue_url"
+      return 0
+      ;;
+  esac
+
+  echo "→ Fetching issue #${_issue_num} context…"
+  _issue_ctx=$(gh issue view "$_issue_num" --repo "$_issue_repo" \
+    --json title,body,labels,comments \
+    --jq '
+      "Title: \(.title)",
+      "Labels: \([(.labels // [])[].name] | join(", ") | if . == "" then "none" else . end)",
+      "",
+      "## Description",
+      ((.body // "") | if . == "" then "(no description)" else . end),
+      ((.comments // []) | if length == 0 then empty else ("", "## Comments", (.[] | "--- @\(.author.login // "unknown") ---\n\(.body // "")")) end)
+    ')
+
+  if [[ -z "$_issue_ctx" ]]; then
+    echo "error: could not fetch issue #${_issue_num} from ${_issue_repo}." >&2
+    return 1
+  fi
+
+  read -rp "Extra instructions (optional): " _extra
+
+  _prompt="Work on GitHub issue #${_issue_num} in ${_issue_repo}.
+${_issue_url}
+
+${_issue_ctx}"
+
+  if [[ -n "$_extra" ]]; then
+    _prompt="${_prompt}
+
+## Extra instructions from the user
+${_extra}"
+  fi
+
+  if [[ "$_issue_dry_run" == "true" ]]; then
+    echo ""
+    echo "── dry run: prompt that would be sent to claude ──"
+    echo "$_prompt"
+    echo "─────────────────────────────────────────────────"
+    return 0
+  fi
+
+  echo "→ Launching Claude session…"
+  exec claude "$_prompt"
+}
+
 if [[ "${1:-}" == "issue" ]]; then
-  _issue_url="${2:-}"
+  _issue_url=""
+  _issue_dry_run=false
+
+  shift
+  for _arg in "$@"; do
+    case "$_arg" in
+      --dry-run|-n) _issue_dry_run=true ;;
+      -*)
+        echo "error: unknown flag for 'gai issue': $_arg" >&2
+        exit 1
+        ;;
+      *)
+        if [[ -z "$_issue_url" ]]; then
+          _issue_url="$_arg"
+        fi
+        ;;
+    esac
+  done
 
   if [[ -z "$_issue_url" ]]; then
-    echo "Usage: gai issue <github-issue-url>" >&2
+    echo "Usage: gai issue <github-issue-url> [--dry-run]" >&2
     exit 1
   fi
 
@@ -110,8 +192,9 @@ if [[ "${1:-}" == "issue" ]]; then
   done < <(gh pr list --repo "$_issue_repo" --state open --json number,title --jq '.[] | "\(.number)|\(.title)"')
 
   if [[ ${#_pr_list[@]} -eq 0 ]]; then
-    echo "No open PRs in $_issue_repo." >&2
-    exit 1
+    echo "No open PRs in $_issue_repo — nothing to attach the issue to."
+    _gai_issue_claude_session
+    exit 0
   fi
 
   _pr_num=""
@@ -138,13 +221,13 @@ if [[ "${1:-}" == "issue" ]]; then
 
   if echo "$_pr_body" | grep -qE "#${_issue_num}([^0-9]|$)"; then
     echo "Issue #$_issue_num already referenced in PR #$_pr_num."
-    exit 0
+  else
+    gh pr edit "$_pr_num" --repo "$_issue_repo" --body "${_pr_body}
+Closes #${_issue_num}"
+    echo "✓ Added \"Closes #${_issue_num}\" to PR #${_pr_num}"
   fi
 
-  gh pr edit "$_pr_num" --repo "$_issue_repo" --body "${_pr_body}
-Closes #${_issue_num}"
-
-  echo "✓ Added \"Closes #${_issue_num}\" to PR #${_pr_num}"
+  _gai_issue_claude_session
   exit 0
 fi
 
@@ -240,7 +323,8 @@ for arg in "$@"; do
       echo "  --logs       : show last 24 h of activity (\$GAI_LOG_DIR)"
       echo "  update       : pull latest version from GitHub"
       echo "  pr           : create a GitHub PR from current branch (requires gh CLI)"
-      echo "  issue <url>  : attach a GitHub issue to an open PR (auto if one PR, select if many)"
+      echo "  issue <url>  : attach a GitHub issue to an open PR, then offer to start a"
+      echo "                 Claude session seeded with the full issue thread"
       echo "  pause        : stop auto-commit (gai pr / gai issue keep working)"
       echo "  resume       : re-enable auto-commit after 'gai pause'"
       echo "  remove       : uninstall gai/gai-watch (alias: uninstall)"
