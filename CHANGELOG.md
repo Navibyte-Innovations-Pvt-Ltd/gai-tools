@@ -9,6 +9,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) — [Semantic V
 ## [Unreleased]
 ### Added
 
+- feat(gai): `gai issue <url>` now offers to start a Claude session seeded with the
+  full issue thread — title, labels, description and every comment — plus one
+  optional line of extra instructions, then `exec`s `claude` in the current repo.
+  The offer fires on every run, including when the issue is already attached to the
+  PR, so re-running the command is how you pick work back up. `--dry-run` prints the
+  composed prompt instead of launching; no TTY or no `claude` on `PATH` skips it
+
 - feat(gai): `--force` flag plus a `GAI_ALLOW_PATHS` env glob list and `allow=<glob>`
   lines in a repo-root `.gairc` to override the secret check. `.gairc` is read line
   by line, never `source`d, and is the only override `gai-watch` can see (#31)
