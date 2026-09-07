@@ -14,11 +14,39 @@ gai              # commit staged files one by one
 gai --all        # commit ALL dirty files (staged + unstaged)
 gai --dry-run    # preview messages without committing
 gai update       # update to latest release from GitHub
-gai issue 123    # same, resolving the repo from the current directory
-gai issue <url>  # attach a GitHub issue to an open PR, then offer a Claude session
+gai pr           # open a PR from the current branch (offers to branch off main)
+gai issue 123    # attach an issue to a PR and rewrite its title/body, repo from cwd
+gai issue <url>  # same, for an issue in any repo
 gai-watch        # start watcher manually
 gai-watch --dry-run  # watch + preview only
 ```
+
+## Opening a PR
+
+```bash
+gai pr
+```
+
+Pushes the current branch, AI-generates a title and body from the commits ahead of
+the base branch, and opens the PR with you as assignee.
+
+**Standing on `main` (or `master`, or the repo's default branch)** it no longer
+dead-ends. It asks:
+
+```
+On 'main' — a PR needs a feature branch.
+Branch name [dev] (n to abort):
+```
+
+Press Enter to take `dev`, type any other name to use that, or type `n` to abort.
+If the branch already exists it switches to it instead of failing; naming a base
+branch is rejected. Piped or scripted (no TTY) it still errors out rather than
+creating a branch behind your back.
+
+With no commits ahead of the base it then offers `Create an empty commit to open
+the PR anyway? [Y/n]` — Enter accepts. That is the fast path to an empty PR you can
+fill in later with `gai issue`. If a PR already exists for the branch, `gai pr`
+prints its URL instead of erroring.
 
 ## Working an Issue
 
@@ -37,11 +65,41 @@ Three things happen, in order:
    AI-generate title and body, open the PR — then picks it up. Answer `n` and it
    skips the attach and goes straight to step 3. Creating requires you to be
    standing in that same repo; a URL for a different repo stops with an error
-   telling you where to `cd`. If `gai pr` itself fails (on `main`, nothing to push,
-   Ollama down) the command aborts — fix the blocker and re-run.
-2. **Attach.** `gai` lists the open PRs, auto-picks the only one or shows an
-   arrow-key menu, and appends `Closes #123` to its body. If the issue is already
-   referenced it says so and moves on — it does not stop.
+   telling you where to `cd`. On `main`/`master`, `gai pr` offers to cut a branch
+   first (see below) instead of failing. If `gai pr` fails for another reason
+   (nothing to push, Ollama down) the command aborts — fix the blocker and re-run.
+2. **Attach and rewrite.** `gai` lists the open PRs, auto-picks the only one or
+   shows an arrow-key menu, then rebuilds that PR from the issue thread: it pulls
+   the issue's title and body, regenerates the PR **title** and **body** through
+   Ollama, and rewrites the closing block. Everything the PR already closed stays —
+   `Fixes #9`, `resolved #7` and `Closes #12` are all collected, deduped and
+   re-emitted as one canonical block with the new issue appended:
+
+   ```markdown
+   <!-- gai:closes -->
+   Closes #9
+   Closes #12
+   Closes #31
+   ```
+
+   So the usual loop — `gai pr` opens an empty PR, then `gai issue 31` fills it in,
+   then `gai issue 47` fills it in again — ends with a PR whose title and body cover
+   both issues and whose closing block lists both. Re-running on an already-attached
+   issue is a refresh, not a no-op.
+
+   Context comes from the **PR's own** `headRefName` and commit list via `gh`, never
+   from local `git log`, so picking a PR for a branch you do not have checked out
+   still produces a body that describes that PR.
+
+   It asks `Apply this title and body to PR #35? [Y/n]` before writing — answer `n`
+   to keep the PR as-is and go to step 3. Rewriting never happens unattended: with
+   Ollama stopped, or with no TTY to confirm at, it says so and updates only the
+   closing block, leaving the title and body untouched.
+
+   Only *standalone* closing lines are absorbed into the block. A closing reference
+   buried in a sentence — `This PR closes #9 and adds retries.` — still counts
+   toward the block, but the sentence itself stays in the prose, so #9 ends up
+   mentioned twice. Harmless, and it beats dropping a genuinely linked issue.
 3. **Offer a Claude session.** It asks `Start a Claude session on issue #123 with
    full context? [Y/n]`. Answer yes and it pulls the issue's title, labels,
    description and every comment through `gh`, then prompts for one optional line
@@ -55,7 +113,8 @@ re-running the command is how you start work on an issue you linked yesterday.
 Flags and edge cases:
 
 - `--dry-run` makes **no GitHub writes at all** — it never opens a PR, never edits a
-  PR body, and prints the composed prompt instead of launching Claude.
+  PR title or body, and prints the composed prompt instead of launching Claude. It
+  does print the title and body it *would* have written.
 - Answering `n` skips the session; the attach already happened.
 - No TTY (piped or scripted) skips the offer and prints the manual command.
 - No `claude` on `PATH` skips the offer silently.
