@@ -9,6 +9,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) — [Semantic V
 ## [Unreleased]
 ### Added
 
+- feat(gai): `gai pr` on `main`/`master`/the default branch now offers to cut a
+  feature branch instead of erroring out — `Branch name [dev] (n to abort):`, Enter
+  takes `dev`, an existing branch is checked out rather than recreated, and a base
+  branch name is rejected. Non-TTY runs keep the old hard error
+- feat(gai): `gai issue` now rewrites the target PR's **title and body** from the
+  issue thread, not just its closing line. Every issue the PR already closed is
+  preserved — `Closes`/`Fixes`/`Resolves` are all collected, deduped and re-emitted
+  as one canonical `<!-- gai:closes -->` block with the new issue appended — so
+  running `gai issue` a second time refreshes the title and body while keeping the
+  first issue linked. Context is read from the PR's own head branch and commits via
+  `gh`, never from local `git log`, so selecting a PR for a branch you do not have
+  checked out still produces an accurate body. Rewriting never runs unattended: it
+  confirms before writing, and degrades to closing-block-only updates when Ollama is
+  not running or when there is no TTY to confirm at
+
 - feat(gai): `gai issue` accepts a bare issue number (`gai issue 1677`) and resolves
   the repo from the current directory via `gh repo view`. Full URLs still work from
   anywhere
@@ -32,8 +47,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) — [Semantic V
   `pypi-`, PEM headers). No entropy heuristics, so ordinary fixtures still
   commit (#31)
 
+### Changed
+
+- change(gai): `Create an empty commit to open the PR anyway?` now defaults to
+  **yes** — pressing Enter creates the commit instead of aborting. The destructive
+  `gai remove` confirmation still defaults to no
+
 ### Fixed
 
+- fix(gai): a `read` prompt hitting EOF no longer kills the script under `set -e`;
+  it falls through to the prompt's default instead of exiting mid-question
+- fix(gai): PR titles no longer echo the prompt's worked example back verbatim, stack
+  two conventional-commit prefixes (`feat(a): fix(b): …`), or end on a dangling
+  preposition after being truncated to 72 chars
 - fix(gai): an invalid issue reference printed nothing and exited 1 — `set -e` aborted
   on the non-matching `grep` before the error message ran
 
