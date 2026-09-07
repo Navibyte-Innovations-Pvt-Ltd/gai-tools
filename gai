@@ -72,6 +72,123 @@ _gai_select_menu() {
   _MENU_RESULT=$_idx
 }
 
+# ── ollama helpers (shared by `gai pr` and `gai issue`) ───────────────────────
+
+_gai_ollama_up() {
+  curl -s --connect-timeout 2 "http://localhost:11434" > /dev/null 2>&1
+}
+
+# $1 = prompt text. Echoes the model response, or nothing on any failure.
+_gai_ollama_gen() {
+  local _escaped
+  _escaped=$(python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" <<< "$1")
+  curl -s --connect-timeout 10 "$OLLAMA_URL" \
+    -H "Content-Type: application/json" \
+    -d "{\"model\":\"$MODEL\",\"prompt\":$_escaped,\"stream\":false}" \
+    | python3 -c "
+import sys, json
+try:
+  d = json.load(sys.stdin)
+  print(d.get('response', '').strip())
+except Exception:
+  pass
+" || true
+}
+
+# $1 = branch, $2 = commit list, $3 = issue context (optional).
+_gai_gen_pr_title() {
+  local _branch="$1" _commits="$2" _issues="${3:-}" _prompt _out _title
+
+  _prompt="Generate a GitHub pull request title for this branch.
+Reply with ONLY the title on one line. No explanation. No backticks. No quotes. No trailing period.
+Format: type(scope): short description
+Rules:
+- type: one of feat fix refactor style docs test chore perf
+- scope: single word naming the most specific component changed, taken from the
+  Branch, Commits or Issues text below — never invented
+- description: imperative mood, HARD LIMIT 50 chars after the colon
+- Total title MUST be under 72 characters. Count carefully.
+- Every word must come from the real work described below.
+
+Branch: $_branch
+Commits:
+$_commits"
+
+  if [[ -n "$_issues" ]]; then
+    _prompt="${_prompt}
+
+This PR closes the GitHub issues below. Base the title on what THEY ask for —
+they describe the work far better than the commit list does. Rewrite the issue
+title in the type(scope): format above:
+$_issues"
+  fi
+
+  _out=$(_gai_ollama_gen "$_prompt")
+  # Keep the first non-empty line and hard-truncate at a word boundary if the
+  # model ignored the 72-char instruction.
+  _title=$(printf '%s' "$_out" | python3 -c "
+import re, sys
+lines = [l.strip().strip('\"') for l in sys.stdin.read().splitlines() if l.strip()]
+t = lines[0] if lines else ''
+# The model sometimes stacks two conventional prefixes ('feat(a): fix(b): …').
+# Drop the outer ones and keep the innermost, which names the real change.
+pre = r'(feat|fix|refactor|style|docs|test|chore|perf)(\([^)]*\))?!?:\s*'
+while re.match('^' + pre + pre, t):
+  t = re.sub('^' + pre, '', t, count=1)
+t = t.rstrip('.')
+if len(t) > 72:
+  t = t[:72].rsplit(' ', 1)[0].rstrip(',:;-')
+  # Truncating mid-phrase can leave a dangling preposition ('… for secrets in').
+  stop = {'in','to','for','of','on','at','the','a','an','and','or','with','from','by'}
+  parts = t.split()
+  while parts and parts[-1].lower() in stop:
+    parts.pop()
+  t = ' '.join(parts).rstrip(',:;-')
+print(t)
+")
+
+
+  printf '%s\n' "$_title"
+}
+
+# $1 = branch, $2 = commit list, $3 = diffstat (optional), $4 = issue context (optional).
+_gai_gen_pr_body() {
+  local _branch="$1" _commits="$2" _diffstat="${3:-}" _issues="${4:-}" _changes _prompt
+  if [[ -n "$_diffstat" ]]; then
+    _changes="$_diffstat"
+  else
+    _changes="One bullet per commit, grouped by area."
+  fi
+
+  _prompt="Generate a GitHub pull request body in markdown.
+Use this exact structure — fill every section with real content, no placeholders:
+
+## What and why
+2-3 sentences explaining: what problem or limitation existed before this PR, why it occurred (root cause), and what this PR does to fix or add it. Name the specific files, functions, or behaviors involved.
+
+## Changes
+$_changes
+
+## Test plan
+- [ ] Write specific, actionable test steps based on what actually changed. Not generic steps.
+
+Reply with ONLY the markdown. No preamble. No backticks around the whole response.
+Do NOT write any \"Closes #\", \"Fixes #\" or \"Resolves #\" line — those are appended separately.
+
+Branch: $_branch
+Commits:
+$_commits"
+
+  if [[ -n "$_issues" ]]; then
+    _prompt="${_prompt}
+
+## GitHub issues this PR closes
+$_issues"
+  fi
+
+  _gai_ollama_gen "$_prompt"
+}
+
 # ── issue subcommand ──────────────────────────────────────────────────────────
 
 # Compose the full issue thread (title, labels, body, comments) into a prompt and
@@ -88,7 +205,7 @@ _gai_issue_claude_session() {
   fi
 
   echo ""
-  read -rp "Start a Claude session on issue #${_issue_num} with full context? [Y/n] " _claude_confirm
+  read -rp "Start a Claude session on issue #${_issue_num} with full context? [Y/n] " _claude_confirm || true
   case "$_claude_confirm" in
     [Nn]*)
       echo "Skipped. Re-run any time: gai issue $_issue_url"
@@ -113,7 +230,7 @@ _gai_issue_claude_session() {
     return 1
   fi
 
-  read -rp "Extra instructions (optional): " _extra
+  read -rp "Extra instructions (optional): " _extra || true
 
   _prompt="Work on GitHub issue #${_issue_num} in ${_issue_repo}.
 ${_issue_url}
@@ -225,7 +342,7 @@ if [[ "${1:-}" == "issue" ]]; then
       exit 1
     fi
 
-    read -rp "Create one now? [Y/n] " _mk_pr
+    read -rp "Create one now? [Y/n] " _mk_pr || true
     case "$_mk_pr" in
       [Nn]*)
         echo "Skipped PR creation — issue #${_issue_num} not attached."
@@ -286,16 +403,135 @@ if [[ "${1:-}" == "issue" ]]; then
     _pr_title=$(echo "${_pr_list[$_idx]}" | cut -d'|' -f2)
   fi
 
-  _pr_body=$(gh pr view "$_pr_num" --repo "$_issue_repo" --json body --jq '.body')
+  # Everything below is sourced from the PR itself, never from local git: the
+  # selected PR may belong to a branch that is not checked out here, and
+  # describing HEAD's commits in someone else's PR would be worse than useless.
+  _pr_json=$(gh pr view "$_pr_num" --repo "$_issue_repo" --json headRefName,title,body,commits)
 
-  if echo "$_pr_body" | grep -qE "#${_issue_num}([^0-9]|$)"; then
-    echo "Issue #$_issue_num already referenced in PR #$_pr_num."
-  elif [[ "$_issue_dry_run" == "true" ]]; then
-    echo "dry run: would add \"Closes #${_issue_num}\" to PR #${_pr_num}."
+  _pr_body=$(echo "$_pr_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('body') or '')")
+  _pr_head=$(echo "$_pr_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('headRefName') or '')")
+  _pr_cur_title=$(echo "$_pr_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('title') or '')")
+  _pr_commits=$(echo "$_pr_json" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+for c in (d.get('commits') or [])[:40]:
+  print('- ' + (c.get('messageHeadline') or '').strip())
+")
+
+  # Collect every issue this PR already closes. All GitHub closing keywords
+  # count: collecting only 'Closes' while stripping the rest would silently drop
+  # a hand-written 'Fixes #9' and stop that issue from auto-closing.
+  _close_re='(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]+#[0-9]+'
+  _prev_nums=$(printf '%s\n' "$_pr_body" | grep -ioE "$_close_re" | grep -oE '[0-9]+' || true)
+
+  # First-seen order, new issue last.
+  _all_nums=$(printf '%s\n%s\n' "$_prev_nums" "$_issue_num" | grep -E '^[0-9]+$' | awk '!seen[$0]++')
+
+  if printf '%s\n' "$_prev_nums" | grep -qx "$_issue_num"; then
+    echo "→ Issue #$_issue_num already referenced in PR #$_pr_num — refreshing title and body."
+  fi
+
+  # Strip the old closing region so it can be rebuilt in full, and drop the
+  # trailing blank lines that stripping leaves behind.
+  _pr_body_clean=$(printf '%s\n' "$_pr_body" \
+    | grep -viE "^[[:space:]]*${_close_re}[[:space:]]*$" \
+    | grep -v '^<!-- gai:closes -->$' \
+    | python3 -c "import sys; print(sys.stdin.read().rstrip())" || true)
+
+  # Rendered once: "#9 #12 #31", no trailing blank.
+  _nums_pretty=$(echo "$_all_nums" | sed 's/^/#/' | tr '\n' ' ' | sed 's/ *$//')
+
+  # Pull each linked issue's thread so the regenerated title and body describe
+  # what the PR is actually for, not just what the commits happened to touch.
+  echo "→ Fetching context for issue(s): $_nums_pretty"
+  _issues_ctx=""
+  for _n in $_all_nums; do
+    _one=$(gh issue view "$_n" --repo "$_issue_repo" --json title,body \
+      --jq '"\(.title)\n\(.body // "")"' 2>/dev/null || true)
+    if [[ -n "$_one" ]]; then
+      # Cap each thread — a long issue body starves the model's context window.
+      _one=$(printf '%s' "$_one" | head -c 2000)
+      _issues_ctx="${_issues_ctx}### Issue #${_n}
+${_one}
+
+"
+    fi
+  done
+
+  _new_title="$_pr_cur_title"
+  _new_body="$_pr_body_clean"
+  _rewrote=false
+
+  # Rewriting replaces a possibly hand-written title and body, so it never runs
+  # unattended: with no TTY to confirm at, only the closing block is updated.
+  # --dry-run is exempt — it writes nothing either way.
+  if [[ ! -t 0 && "$_issue_dry_run" != "true" ]]; then
+    echo "Not a TTY — updating the closing block only, leaving the title and body alone."
+  elif _gai_ollama_up; then
+    echo "→ Regenerating PR title…"
+    _gen_title=$(_gai_gen_pr_title "$_pr_head" "$_pr_commits" "$_issues_ctx")
+    if [[ -n "$_gen_title" ]]; then
+      _new_title="$_gen_title"
+      _rewrote=true
+    fi
+
+    echo "→ Regenerating PR body…"
+    _gen_body=$(_gai_gen_pr_body "$_pr_head" "$_pr_commits" "" "$_issues_ctx")
+    if [[ -n "$_gen_body" ]]; then
+      # A 1.5b model will emit closing lines however firmly the prompt forbids
+      # it; the post-filter is what actually keeps the closing block canonical.
+      _new_body=$(printf '%s\n' "$_gen_body" \
+        | grep -viE "^[[:space:]]*${_close_re}[[:space:]]*$" \
+        | python3 -c "import sys; print(sys.stdin.read().rstrip())" || true)
+      _rewrote=true
+    fi
   else
-    gh pr edit "$_pr_num" --repo "$_issue_repo" --body "${_pr_body}
-Closes #${_issue_num}"
-    echo "✓ Added \"Closes #${_issue_num}\" to PR #${_pr_num}"
+    echo "⚠ Ollama not running — keeping the existing title and body."
+    echo "  Start it (ollama serve) and re-run to regenerate them."
+  fi
+
+  # Canonical closing block, rebuilt from scratch every run so re-running with a
+  # second issue keeps the first one's Closes line alongside the new one.
+  _closes_block="<!-- gai:closes -->"
+  for _n in $_all_nums; do
+    _closes_block="${_closes_block}
+Closes #${_n}"
+  done
+
+  _final_body="${_new_body}
+
+${_closes_block}"
+
+  if [[ "$_issue_dry_run" == "true" ]]; then
+    echo ""
+    echo "── dry run: PR #${_pr_num} would become ──"
+    echo "Title: $_new_title"
+    echo ""
+    echo "$_final_body"
+    echo "─────────────────────────────────────────"
+  else
+    if [[ -t 0 ]]; then
+      echo ""
+      echo "PR #${_pr_num} new title: $_new_title"
+      echo "Closes: $_nums_pretty"
+      read -rp "Apply this title and body to PR #${_pr_num}? [Y/n] " _apply || true
+      case "$_apply" in
+        [Nn]*)
+          echo "Skipped — PR #${_pr_num} left unchanged."
+          _gai_issue_claude_session
+          exit 0
+          ;;
+      esac
+    fi
+
+    gh pr edit "$_pr_num" --repo "$_issue_repo" \
+      --title "$_new_title" \
+      --body "$_final_body"
+    if [[ "$_rewrote" == "true" ]]; then
+      echo "✓ Updated PR #${_pr_num} — title, body, and Closes for $_nums_pretty"
+    else
+      echo "✓ Updated PR #${_pr_num} — Closes for $_nums_pretty (title and body unchanged)"
+    fi
   fi
 
   _gai_issue_claude_session
@@ -361,7 +597,7 @@ for arg in "$@"; do
       ;;
     remove|uninstall)
       echo "This will remove gai/gai-watch, stop all watchers, and remove the ~/.zshrc hook."
-      read -rp "Continue? [y/N] " _confirm
+      read -rp "Continue? [y/N] " _confirm || true
       if [[ "$_confirm" != "y" && "$_confirm" != "Y" ]]; then
         echo "Aborted."
         exit 0
@@ -393,9 +629,12 @@ for arg in "$@"; do
       echo "  --version    : print installed gai-tools version"
       echo "  --logs       : show last 24 h of activity (\$GAI_LOG_DIR)"
       echo "  update       : pull latest version from GitHub"
-      echo "  pr           : create a GitHub PR from current branch (requires gh CLI)"
+      echo "  pr           : create a GitHub PR from current branch (requires gh CLI)."
+      echo "                 On main/master it offers to cut a branch first (default: dev)."
       echo "  issue <n|url>: attach a GitHub issue to an open PR (creates one if none open),"
-      echo "                 then offer a Claude session seeded with the full issue thread."
+      echo "                 rewrite the PR title and body from the issue thread, keep every"
+      echo "                 previous 'Closes #N' and add the new one, then offer a Claude"
+      echo "                 session seeded with the full issue thread."
       echo "                 A bare number resolves against the repo you are standing in."
       echo "  pause        : stop auto-commit (gai pr / gai issue keep working)"
       echo "  resume       : re-enable auto-commit after 'gai pause'"
@@ -433,20 +672,52 @@ if [[ "${_gai_pr:-false}" == "true" ]]; then
   CURRENT_BRANCH=$(git branch --show-current)
   BASE_BRANCH=$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null || echo "main")
 
+  # A PR cannot be opened from the base branch. Rather than dead-ending here,
+  # offer to cut the feature branch the user was going to create anyway.
   if [[ "$CURRENT_BRANCH" == "$BASE_BRANCH" || "$CURRENT_BRANCH" == "main" || "$CURRENT_BRANCH" == "master" ]]; then
-    echo "error: on branch '$CURRENT_BRANCH' — switch to a feature branch first." >&2
-    exit 1
+    if [[ ! -t 0 ]]; then
+      echo "error: on branch '$CURRENT_BRANCH' — switch to a feature branch first." >&2
+      exit 1
+    fi
+
+    echo "On '$CURRENT_BRANCH' — a PR needs a feature branch."
+    read -rp "Branch name [dev] (n to abort): " _new_branch || true
+    _new_branch="${_new_branch:-dev}"
+
+    case "$_new_branch" in
+      [Nn]|[Nn][Oo])
+        echo "Aborted — still on '$CURRENT_BRANCH'." >&2
+        exit 1
+        ;;
+    esac
+
+    if [[ "$_new_branch" == "$BASE_BRANCH" || "$_new_branch" == "main" || "$_new_branch" == "master" ]]; then
+      echo "error: '$_new_branch' is a base branch — pick another name." >&2
+      exit 1
+    fi
+
+    if git show-ref --verify --quiet "refs/heads/$_new_branch"; then
+      echo "→ Branch '$_new_branch' already exists — switching to it."
+      git checkout "$_new_branch"
+    else
+      echo "→ Creating branch '$_new_branch'…"
+      git checkout -b "$_new_branch"
+    fi
+
+    CURRENT_BRANCH=$(git branch --show-current)
   fi
 
   git fetch origin "$BASE_BRANCH" --quiet 2>/dev/null || true
   PR_COMMITS=$(git log "origin/$BASE_BRANCH"..HEAD --oneline 2>/dev/null)
   if [[ -z "$PR_COMMITS" ]]; then
     echo "No commits ahead of 'origin/$BASE_BRANCH' — nothing to diff." >&2
-    read -rp "Create an empty commit to open the PR anyway (e.g. for issue tracking)? [y/N] " _empty_confirm
-    if [[ "$_empty_confirm" != "y" && "$_empty_confirm" != "Y" ]]; then
-      echo "Aborted." >&2
-      exit 1
-    fi
+    read -rp "Create an empty commit to open the PR anyway (e.g. for issue tracking)? [Y/n] " _empty_confirm || true
+    case "$_empty_confirm" in
+      [Nn]*)
+        echo "Aborted." >&2
+        exit 1
+        ;;
+    esac
     git commit --allow-empty -m "chore($CURRENT_BRANCH): open PR for issue tracking"
     PR_COMMITS=$(git log "origin/$BASE_BRANCH"..HEAD --oneline 2>/dev/null)
   fi
@@ -460,76 +731,15 @@ if [[ "${_gai_pr:-false}" == "true" ]]; then
 
   PR_DIFF_STAT=$(git diff --no-ext-diff "origin/$BASE_BRANCH"...HEAD --stat 2>/dev/null)
 
-  _pr_title_prompt="Generate a GitHub pull request title for these commits.
-Reply with ONLY the title on one line. No explanation. No backticks. No quotes. No trailing period.
-Format: type(scope): short description
-Rules:
-- type: feat fix refactor style docs test chore perf
-- scope: single word, most specific component changed
-- description: imperative mood, HARD LIMIT 50 chars after the colon
-- Total title MUST be under 72 characters. Count carefully.
-- BAD: \"feat(glitchbridge): add authentication flow to glitchbridge electron app server\"
-- GOOD: \"feat(glitchbridge): add auth flow to electron server\"
-
-Branch: $CURRENT_BRANCH
-Commits:
-$PR_COMMITS"
-
-  _pr_body_prompt="Generate a GitHub pull request body in markdown.
-Use this exact structure — fill every section with real content, no placeholders:
-
-## What and why
-2-3 sentences explaining: what problem or limitation existed before this PR, why it occurred (root cause), and what this PR does to fix or add it. Name the specific files, functions, or behaviors involved.
-
-## Changes
-$PR_DIFF_STAT
-
-## Test plan
-- [ ] Write specific, actionable test steps based on what actually changed. Not generic steps.
-
-Reply with ONLY the markdown. No preamble. No backticks around the whole response.
-
-Branch: $CURRENT_BRANCH
-Commits:
-$PR_COMMITS"
-
   echo "→ Generating PR title…"
-  _title_escaped=$(python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" <<< "$_pr_title_prompt")
-  PR_TITLE=$(curl -s --connect-timeout 10 "$OLLAMA_URL" \
-    -H "Content-Type: application/json" \
-    -d "{\"model\":\"$MODEL\",\"prompt\":$_title_escaped,\"stream\":false}" \
-    | python3 -c "
-import sys, json
-try:
-  d = json.load(sys.stdin)
-  msg = d.get('response', '').strip()
-  lines = [l.strip() for l in msg.splitlines() if l.strip()]
-  title = lines[0] if lines else ''
-  # Hard truncate at word boundary if model ignores the 72-char instruction.
-  if len(title) > 72:
-    title = title[:72].rsplit(' ', 1)[0].rstrip(',:;-')
-  print(title)
-except Exception:
-  pass
-" || true)
+  PR_TITLE=$(_gai_gen_pr_title "$CURRENT_BRANCH" "$PR_COMMITS")
 
   if [[ -z "$PR_TITLE" ]]; then
     PR_TITLE="feat(${CURRENT_BRANCH}): changes from branch"
   fi
 
   echo "→ Generating PR body…"
-  _body_escaped=$(python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" <<< "$_pr_body_prompt")
-  PR_BODY=$(curl -s --connect-timeout 10 "$OLLAMA_URL" \
-    -H "Content-Type: application/json" \
-    -d "{\"model\":\"$MODEL\",\"prompt\":$_body_escaped,\"stream\":false}" \
-    | python3 -c "
-import sys, json
-try:
-  d = json.load(sys.stdin)
-  print(d.get('response', '').strip())
-except Exception:
-  pass
-" || true)
+  PR_BODY=$(_gai_gen_pr_body "$CURRENT_BRANCH" "$PR_COMMITS" "$PR_DIFF_STAT")
 
   if [[ -z "$PR_BODY" ]]; then
     _pr_bullets=""
@@ -546,11 +756,20 @@ $PR_DIFF_STAT"
   git push -u origin "$CURRENT_BRANCH"
 
   echo "→ Creating PR…"
-  PR_URL=$(gh pr create \
+  # A PR may already exist for this branch (common when re-running after
+  # 'gai issue'); surface its URL instead of failing.
+  if ! PR_URL=$(gh pr create \
     --base "$BASE_BRANCH" \
     --assignee @me \
     --title "$PR_TITLE" \
-    --body "$PR_BODY")
+    --body "$PR_BODY"); then
+    PR_URL=$(gh pr view --json url --jq '.url' 2>/dev/null || true)
+    if [[ -z "$PR_URL" ]]; then
+      echo "error: PR creation failed." >&2
+      exit 1
+    fi
+    echo "→ A PR already exists for '$CURRENT_BRANCH' — reusing it."
+  fi
 
   echo ""
   echo "✓ PR created: $PR_URL"
