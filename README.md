@@ -58,7 +58,8 @@ The installer handles everything: Homebrew check, `fswatch`, `ollama`, model dow
 | `gai --dry-run` | Preview messages without committing |
 | `gai --force` | Commit even if a file trips the secret check |
 | `gai update` | Update to latest release from GitHub |
-| `gai issue <n\|url>` | Attach a GitHub issue to an open PR (opens one if none exist), then offer a Claude session seeded with the full issue thread |
+| `gai pr` | Open a PR from the current branch — on `main`/`master` it offers to cut one first (default name: `dev`) |
+| `gai issue <n\|url>` | Attach a GitHub issue to an open PR (opens one if none exist), rewrite that PR's title and body from the issue thread, keep every previous `Closes #N` and add the new one, then offer a Claude session seeded with the full thread |
 | `gai-watch` | Start watcher manually |
 | `gai-watch --dry-run` | Watch + preview only |
 | `gai --help` | Show help |
