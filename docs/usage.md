@@ -96,6 +96,17 @@ Three things happen, in order:
    Ollama stopped, or with no TTY to confirm at, it says so and updates only the
    closing block, leaving the title and body untouched.
 
+   The whole rewrite gets a **15-second budget** — title and body together, not
+   each. On a machine with no spare GPU or RAM a 1.5b model can grind for
+   minutes, and attaching the issue matters more than a fresh title, so a run
+   that blows the budget prints `⚠ Model did not finish inside 15s` and writes
+   only the closing block. It is all-or-nothing: a fresh title above a stale
+   body describes neither, so a body that misses the deadline discards the title
+   too. The title is generated first because it is the cheaper prompt; if it
+   times out, the body is skipped outright. Raise the budget with
+   `GAI_ISSUE_TIMEOUT=60 gai issue 123`. `gai pr` has no budget: it has no
+   existing title or body to fall back on, so it waits as long as the model needs.
+
    Only *standalone* closing lines are absorbed into the block. A closing reference
    buried in a sentence — `This PR closes #9 and adds retries.` — still counts
    toward the block, but the sentence itself stays in the prose, so #9 ends up
