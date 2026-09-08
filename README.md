@@ -72,6 +72,17 @@ export GAI_MODEL=qwen2.5-coder:7b   # use a larger model
 
 Default: `qwen2.5-coder:1.5b` (~200ms on Apple Silicon)
 
+### Generation timeout (`gai issue`)
+
+```bash
+export GAI_ISSUE_TIMEOUT=60   # default: 15 seconds, title + body combined
+```
+
+`gai issue` gives the model 15 seconds total for the PR title and body. Blow the
+budget — a busy GPU, not enough RAM — and it attaches the issue with just the
+`Closes #N` block, leaving the existing title and body alone. `gai pr` is
+unbudgeted; it has nothing to fall back on.
+
 ### Secret files
 
 `gai` refuses to commit a file whose **name** is a secret store (`.env`,
