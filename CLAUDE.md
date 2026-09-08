@@ -46,4 +46,5 @@ gai-watch --dry-run     # watch + preview only
 - **Lock/race**: `gai` uses a lockfile at `/tmp/gai-<repo-hash>.lock` — don't bypass it
 - **Ollama not running**: `ollama serve` then `ollama pull qwen2.5-coder:1.5b`
 - **Model override**: `export GAI_MODEL=qwen2.5-coder:7b` before running
+- **`gai issue` slow / hangs on generation**: 15 s budget for title + body combined, then it attaches the issue only — raise with `GAI_ISSUE_TIMEOUT=60`; see `docs/usage.md#working-an-issue`
 - **Secret skip false positive**: basename + added-line gates only; override with `gai --force`, `GAI_ALLOW_PATHS`, or `allow=<glob>` in `<repo>/.gairc` — see `docs/usage.md#what-gai-skips`
