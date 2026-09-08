@@ -78,14 +78,27 @@ _gai_ollama_up() {
   curl -s --connect-timeout 2 "http://localhost:11434" > /dev/null 2>&1
 }
 
+# Seconds one generation may take before gai gives up on it. Empty means wait as
+# long as the model needs — `gai pr` has nothing to fall back on, so it waits.
+# `gai issue` sets a budget: on a box with no spare GPU or RAM a 1.5b model can
+# grind for minutes, and attaching the issue matters more than a fresh title.
+GAI_GEN_TIMEOUT="${GAI_GEN_TIMEOUT:-}"
+
 # $1 = prompt text. Echoes the model response, or nothing on any failure.
+# Returns 1 when the request itself failed (timeout included), 0 otherwise.
 _gai_ollama_gen() {
-  local _escaped
+  local _escaped _raw
   _escaped=$(python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" <<< "$1")
-  curl -s --connect-timeout 10 "$OLLAMA_URL" \
+  local _curl=(curl -s --connect-timeout 10)
+  if [[ -n "$GAI_GEN_TIMEOUT" ]]; then
+    _curl+=(--max-time "$GAI_GEN_TIMEOUT")
+  fi
+  if ! _raw=$("${_curl[@]}" "$OLLAMA_URL" \
     -H "Content-Type: application/json" \
-    -d "{\"model\":\"$MODEL\",\"prompt\":$_escaped,\"stream\":false}" \
-    | python3 -c "
+    -d "{\"model\":\"$MODEL\",\"prompt\":$_escaped,\"stream\":false}"); then
+    return 1
+  fi
+  printf '%s' "$_raw" | python3 -c "
 import sys, json
 try:
   d = json.load(sys.stdin)
@@ -123,7 +136,7 @@ title in the type(scope): format above:
 $_issues"
   fi
 
-  _out=$(_gai_ollama_gen "$_prompt")
+  _out=$(_gai_ollama_gen "$_prompt") || return 1
   # Keep the first non-empty line and hard-truncate at a word boundary if the
   # model ignored the 72-char instruction.
   _title=$(printf '%s' "$_out" | python3 -c "
@@ -468,16 +481,46 @@ ${_one}
   if [[ ! -t 0 && "$_issue_dry_run" != "true" ]]; then
     echo "Not a TTY — updating the closing block only, leaving the title and body alone."
   elif _gai_ollama_up; then
-    echo "→ Regenerating PR title…"
-    _gen_title=$(_gai_gen_pr_title "$_pr_head" "$_pr_commits" "$_issues_ctx")
-    if [[ -n "$_gen_title" ]]; then
-      _new_title="$_gen_title"
-      _rewrote=true
+    # Attaching the issue is the job; rewriting the title and body is a bonus.
+    # One budget covers BOTH generations, so `gai issue` never stalls longer than
+    # the user was told to expect — on a box with no spare GPU or RAM a 1.5b
+    # model can grind for minutes.
+    _budget="${GAI_ISSUE_TIMEOUT:-15}"
+    _deadline=$(( $(date +%s) + _budget ))
+    _gen_title=""
+    _gen_body=""
+    _slow=false
+
+    echo "→ Regenerating PR title… (${_budget}s budget for title + body)"
+    GAI_GEN_TIMEOUT="$_budget"
+    if ! _gen_title=$(_gai_gen_pr_title "$_pr_head" "$_pr_commits" "$_issues_ctx"); then
+      _slow=true
     fi
 
-    echo "→ Regenerating PR body…"
-    _gen_body=$(_gai_gen_pr_body "$_pr_head" "$_pr_commits" "" "$_issues_ctx")
-    if [[ -n "$_gen_body" ]]; then
+    # The title is the cheaper prompt: if it did not land, the body has no chance
+    # in whatever is left, so skip it rather than burning the rest of the budget.
+    if [[ "$_slow" != "true" && -n "$_gen_title" ]]; then
+      GAI_GEN_TIMEOUT=$(( _deadline - $(date +%s) ))
+      if [[ "$GAI_GEN_TIMEOUT" -lt 1 ]]; then
+        _slow=true
+      else
+        echo "→ Regenerating PR body… (${GAI_GEN_TIMEOUT}s left)"
+        if ! _gen_body=$(_gai_gen_pr_body "$_pr_head" "$_pr_commits" "" "$_issues_ctx"); then
+          _slow=true
+        fi
+      fi
+    fi
+    GAI_GEN_TIMEOUT=""
+
+    if [[ "$_slow" == "true" ]]; then
+      echo "⚠ Model did not finish inside ${_budget}s — attaching the issue only,"
+      echo "  title and body left as they are. Raise it with GAI_ISSUE_TIMEOUT=60."
+    elif [[ -z "$_gen_title" || -z "$_gen_body" ]]; then
+      echo "⚠ Model returned nothing usable — attaching the issue only,"
+      echo "  title and body left as they are."
+    else
+      # All or nothing: a fresh title above a stale body describes neither.
+      _new_title="$_gen_title"
       # A 1.5b model will emit closing lines however firmly the prompt forbids
       # it; the post-filter is what actually keeps the closing block canonical.
       _new_body=$(printf '%s\n' "$_gen_body" \
@@ -732,14 +775,14 @@ if [[ "${_gai_pr:-false}" == "true" ]]; then
   PR_DIFF_STAT=$(git diff --no-ext-diff "origin/$BASE_BRANCH"...HEAD --stat 2>/dev/null)
 
   echo "→ Generating PR title…"
-  PR_TITLE=$(_gai_gen_pr_title "$CURRENT_BRANCH" "$PR_COMMITS")
+  PR_TITLE=$(_gai_gen_pr_title "$CURRENT_BRANCH" "$PR_COMMITS") || true
 
   if [[ -z "$PR_TITLE" ]]; then
     PR_TITLE="feat(${CURRENT_BRANCH}): changes from branch"
   fi
 
   echo "→ Generating PR body…"
-  PR_BODY=$(_gai_gen_pr_body "$CURRENT_BRANCH" "$PR_COMMITS" "$PR_DIFF_STAT")
+  PR_BODY=$(_gai_gen_pr_body "$CURRENT_BRANCH" "$PR_COMMITS" "$PR_DIFF_STAT") || true
 
   if [[ -z "$PR_BODY" ]]; then
     _pr_bullets=""
