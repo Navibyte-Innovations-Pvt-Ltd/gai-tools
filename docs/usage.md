@@ -31,23 +31,46 @@ gai pr
 Pushes the current branch, AI-generates a title and body from the commits ahead of
 the base branch, and opens the PR with you as assignee.
 
-**Standing on `main` (or `master`, or the repo's default branch)** it no longer
-dead-ends. It asks:
+**Every question comes first, then it runs on its own.** Nothing after the last
+prompt asks anything — it prints a one-line plan and works through it:
 
 ```
 On 'main' — a PR needs a feature branch.
 Branch name [dev] (n to abort):
+No commits ahead of 'origin/main' — nothing to diff.
+Create an empty commit to open the PR anyway (e.g. for issue tracking)? [Y/n]
+→ Plan: branch dev → empty commit → title and body → push → open PR against main
 ```
 
-Press Enter to take `dev`, type any other name to use that, or type `n` to abort.
-If the branch already exists it switches to it instead of failing; naming a base
-branch is rejected. Piped or scripted (no TTY) it still errors out rather than
-creating a branch behind your back.
+That ordering is the point. The two questions used to sit each right above the
+step it gated, so answering the first one meant waiting through a branch switch
+before being asked the second, and the model runs sat between you and the end.
+Now you answer both, walk away, and read the log.
 
-With no commits ahead of the base it then offers `Create an empty commit to open
-the PR anyway? [Y/n]` — Enter accepts. That is the fast path to an empty PR you can
-fill in later with `gai issue`. If a PR already exists for the branch, `gai pr`
-prints its URL instead of erroring.
+**Branch question** — only on `main`/`master`/the default branch. Enter takes
+`dev`, any other name uses that, `n` aborts. An existing branch is switched to
+rather than failing; naming a base branch is rejected.
+
+**Empty-commit question** — only when nothing is ahead of the base. Counted
+against the branch you are *going* to be on, so an existing `dev` that already
+has commits is never asked about. That is the fast path to an empty PR you fill
+in later with `gai issue`. If a PR already exists for the branch, `gai pr` prints
+its URL instead of erroring.
+
+Piped or scripted (no TTY) it still errors rather than creating a branch or an
+empty commit behind your back — unless you answer ahead of time:
+
+| Flag | Answers |
+|------|---------|
+| `--branch=<name>` | the branch question |
+| `--allow-empty` | the empty-commit question |
+| `--yes` (`-y`) | both, with the defaults (`dev`, yes) |
+| `--no-generate` | skips the model entirely — deterministic title and body |
+
+`--no-generate` is what `gai issue` passes: it rewrites the title and body from
+the issue thread seconds later, so generating them here is a model run you wait
+through and never see. It also drops the "Ollama not running" hard stop, which
+only ever guarded generation.
 
 ## Working an Issue
 
@@ -60,18 +83,38 @@ gai issue 123 --remove                               # detach it again
 A bare number (or `#123`) resolves against the repo you are standing in, via
 `gh repo view`. A full URL works from anywhere.
 
-Three things happen, in order:
+**All the questions come first.** `gai issue` asks everything it needs in one
+block, before the first slow step, then runs to the end without stopping:
 
-1. **Make sure a PR exists.** If the repo has no open PR, `gai` asks
-   `Create one now? [Y/n]` and runs the full `gai pr` flow — push the branch,
-   AI-generate title and body, open the PR — then picks it up. Answer `n` and it
-   skips the attach and goes straight to step 3. Creating requires you to be
-   standing in that same repo; a URL for a different repo stops with an error
-   telling you where to `cd`. On `main`/`master`, `gai pr` offers to cut a branch
-   first (see below) instead of failing. If `gai pr` fails for another reason
-   (nothing to push, Ollama down) the command aborts — fix the blocker and re-run.
-2. **Attach and rewrite.** `gai` lists the open PRs, auto-picks the only one or
-   shows an arrow-key menu, then rebuilds that PR from the issue thread: it pulls
+```
+── a few questions, then it runs on its own ──
+Create a PR for #354? [Y/n]
+Rewrite the PR title and body from the issue thread? [Y/n]
+Start a Claude session on #354 when this is done? [Y/n]
+Extra instructions for Claude (optional):
+```
+
+Only the questions your situation actually raises are asked — an issue going onto
+the one open PR of a repo you are already on a branch in gets two, not four. If a
+PR has to be created, `gai pr`'s own two questions (branch name, empty commit)
+follow immediately, with no slow step in between.
+
+Answering yes to the rewrite **is** the approval. The old flow asked
+`Apply this title and body? [Y/n]` *after* the model finished, which is exactly
+the wait this ordering removes: you sat watching a generation just to be asked
+whether you wanted it.
+
+Then it executes, in order:
+
+1. **Make sure a PR exists.** With no open PR and a `yes` to the creation
+   question, it runs `gai pr --no-generate` — branch, empty commit, push, open —
+   then resolves the new PR by asking GitHub which PR belongs to the branch you
+   are now on. Answer `n` and it skips the attach and goes straight to step 3.
+   Creating requires you to be standing in that same repo; a URL for a different
+   repo stops with an error telling you where to `cd`, and it stops *before*
+   asking anything. If `gai pr` fails for another reason (nothing to push) the
+   command aborts — fix the blocker and re-run.
+2. **Attach and rewrite.** `gai` rebuilds the PR from the issue thread: it pulls
    the issue's title and body, regenerates the PR **title** and **body** through
    Ollama, and rewrites the closing block. Everything the PR already closed stays —
    `Fixes #9`, `resolved #7` and `Closes #12` are all collected, deduped and
@@ -105,21 +148,25 @@ Three things happen, in order:
    from local `git log`, so picking a PR for a branch you do not have checked out
    still produces a body that describes that PR.
 
-   It asks `Apply this title and body to PR #35? [Y/n]` before writing — answer `n`
-   to keep the PR as-is and go to step 3. Rewriting never happens unattended: with
-   Ollama stopped, or with no TTY to confirm at, it says so and updates only the
-   closing block, leaving the title and body untouched.
+   Rewriting never happens unattended: answer `n` to the rewrite question, or run
+   with Ollama stopped or with no TTY, and it updates only the closing block,
+   leaving the title and body untouched.
 
-   The whole rewrite gets a **15-second budget** — title and body together, not
+   The whole rewrite gets a **40-second budget** — title and body together, not
    each. On a machine with no spare GPU or RAM a 1.5b model can grind for
    minutes, and attaching the issue matters more than a fresh title, so a run
-   that blows the budget prints `⚠ Model did not finish inside 15s` and writes
+   that blows the budget prints `⚠ Model did not finish inside 40s` and writes
    only the closing block. It is all-or-nothing: a fresh title above a stale
    body describes neither, so a body that misses the deadline discards the title
    too. The title is generated first because it is the cheaper prompt; if it
-   times out, the body is skipped outright. Raise the budget with
-   `GAI_ISSUE_TIMEOUT=60 gai issue 123`. `gai pr` has no budget: it has no
-   existing title or body to fall back on, so it waits as long as the model needs.
+   times out, the body is skipped outright. Raise or lower it with
+   `GAI_ISSUE_TIMEOUT=60 gai issue 123`.
+
+   The budget is 40 s rather than the old 15 s because this is now the **only**
+   generation in the flow. `gai issue` drives PR creation with `--no-generate`,
+   so nothing is thrown away — but that also makes this run load-bearing: miss
+   the budget on a fresh PR and it keeps the plain `feat(dev): changes from
+   branch` fallback.
 
    Only *standalone* closing lines are absorbed into the block. A closing reference
    buried in a sentence — `This PR closes #9 and adds retries.` — still counts
@@ -131,15 +178,15 @@ Three things happen, in order:
    on merge. `gai` checks for it and prints
    `⚠ #34 is still closed by prose left in the PR body` with the offending line
    and its number. It will not rewrite your prose — edit that line by hand.
-3. **Offer a Claude session.** It asks `Start a Claude session on issue #123 with
-   full context? [Y/n]`. Answer yes and it pulls the issue's title, labels,
-   description and every comment through `gh`, then prompts for one optional line
-   of extra instructions. It builds a single prompt out of all of it and `exec`s
-   `claude` in the current directory — so the session starts in your repo, already
-   holding the whole thread. No pasting the URL and waiting for Claude to fetch it.
+3. **Launch Claude.** If you said yes up front, it pulls the issue's title,
+   labels, description and every comment through `gh`, folds in the extra
+   instructions line you already typed, and `exec`s `claude` in the current
+   directory — so the session starts in your repo, already holding the whole
+   thread. No pasting the URL and waiting for Claude to fetch it.
 
-The offer fires on **every** run, including when the issue is already attached, so
-re-running the command is how you start work on an issue you linked yesterday.
+The question is asked on **every** run, including when the issue is already
+attached, so re-running the command is how you start work on an issue you linked
+yesterday.
 
 Flags and edge cases:
 
@@ -148,9 +195,13 @@ Flags and edge cases:
   does print the title and body it *would* have written.
 - `--remove` (`-r`) detaches instead of attaching; combine with `--dry-run` to see
   the resulting title and body before writing anything.
-- Answering `n` skips the session; the attach already happened.
-- No TTY (piped or scripted) skips the offer and prints the manual command.
-- No `claude` on `PATH` skips the offer silently.
+- Answering `n` to the session question skips it; the attach still happens.
+- No TTY (piped or scripted) asks nothing and takes the conservative answers:
+  attach to an existing PR, no branch, no empty commit, no rewrite, no session.
+  Batching the questions never turns an unattended run into yes-to-everything.
+  `--dry-run` is the one exception to "no PR": with no open PR it prints the PR
+  it *would* have created, since it writes nothing either way.
+- No `claude` on `PATH` skips the session question silently.
 - Declining PR creation skips the attach but still offers the session.
 
 ## Commit Format

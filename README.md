@@ -58,8 +58,8 @@ The installer handles everything: Homebrew check, `fswatch`, `ollama`, model dow
 | `gai --dry-run` | Preview messages without committing |
 | `gai --force` | Commit even if a file trips the secret check |
 | `gai update` | Update to latest release from GitHub |
-| `gai pr` | Open a PR from the current branch — on `main`/`master` it offers to cut one first (default name: `dev`) |
-| `gai issue <n\|url>` | Attach a GitHub issue to an open PR (opens one if none exist), rewrite that PR's title and body from the issue thread, keep every previous `Closes #N` and add the new one, then offer a Claude session seeded with the full thread |
+| `gai pr` | Open a PR from the current branch — asks its questions up front (branch name on `main`/`master`, empty commit when nothing is ahead), then runs unattended |
+| `gai issue <n\|url>` | Ask everything up front (create a PR? rewrite title and body? start Claude?), then run it all: attach the issue to an open PR (opening one if none exist), rewrite that PR's title and body from the issue thread, keep every previous `Closes #N` and add the new one, and launch a Claude session seeded with the full thread |
 | `gai issue <n\|url> --remove` | Undo of the above — drop that issue's `Closes #N` from the PR, keep the rest, and rewrite the title and body from the issues that are left |
 | `gai-watch` | Start watcher manually |
 | `gai-watch --dry-run` | Watch + preview only |
@@ -76,13 +76,15 @@ Default: `qwen2.5-coder:1.5b` (~200ms on Apple Silicon)
 ### Generation timeout (`gai issue`)
 
 ```bash
-export GAI_ISSUE_TIMEOUT=60   # default: 15 seconds, title + body combined
+export GAI_ISSUE_TIMEOUT=60   # default: 40 seconds, title + body combined
 ```
 
-`gai issue` gives the model 15 seconds total for the PR title and body. Blow the
+`gai issue` gives the model 40 seconds total for the PR title and body. Blow the
 budget — a busy GPU, not enough RAM — and it attaches the issue with just the
-`Closes #N` block, leaving the existing title and body alone. `gai pr` is
-unbudgeted; it has nothing to fall back on.
+`Closes #N` block, leaving the existing title and body alone. It is 40 s rather
+than 15 s because this is the only generation left in the flow: `gai issue`
+creates PRs with `--no-generate`, since a title written there is overwritten from
+the issue thread seconds later.
 
 ### Secret files
 
