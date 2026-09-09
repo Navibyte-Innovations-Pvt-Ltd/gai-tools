@@ -17,6 +17,7 @@ gai update       # update to latest release from GitHub
 gai pr           # open a PR from the current branch (offers to branch off main)
 gai issue 123    # attach an issue to a PR and rewrite its title/body, repo from cwd
 gai issue <url>  # same, for an issue in any repo
+gai issue 123 --remove   # detach an issue you attached by mistake
 gai-watch        # start watcher manually
 gai-watch --dry-run  # watch + preview only
 ```
@@ -53,6 +54,7 @@ prints its URL instead of erroring.
 ```bash
 gai issue 123                                        # repo from cwd
 gai issue https://github.com/owner/repo/issues/123   # any repo
+gai issue 123 --remove                               # detach it again
 ```
 
 A bare number (or `#123`) resolves against the repo you are standing in, via
@@ -87,6 +89,18 @@ Three things happen, in order:
    both issues and whose closing block lists both. Re-running on an already-attached
    issue is a refresh, not a no-op.
 
+   **Attached the wrong issue?** `gai issue 34 --remove` (or `-r`) is the undo.
+   It drops `#34` from the closing block, keeps every other issue, and rewrites
+   the title and body from the issues that *remain* — the mistaken attach is
+   usually what the old title was generated from, so removing only the `Closes`
+   line would leave the visible half of the mistake behind. Remove the last one
+   and the block goes with it: the PR ends up with a plain body and no
+   `<!-- gai:closes -->` marker, and the title and body fall back to describing
+   the commits. `--remove` never creates a PR (there would be nothing to detach
+   from) and never offers a Claude session — you are stepping away from that
+   issue, not starting on it. Removing an issue the PR does not reference prints
+   `nothing to remove` and exits without touching the PR.
+
    Context comes from the **PR's own** `headRefName` and commit list via `gh`, never
    from local `git log`, so picking a PR for a branch you do not have checked out
    still produces a body that describes that PR.
@@ -111,6 +125,12 @@ Three things happen, in order:
    buried in a sentence — `This PR closes #9 and adds retries.` — still counts
    toward the block, but the sentence itself stays in the prose, so #9 ends up
    mentioned twice. Harmless, and it beats dropping a genuinely linked issue.
+
+   Under `--remove` that same asymmetry is not harmless: the canonical line goes
+   away while the sentence keeps closing the issue, so GitHub would still shut it
+   on merge. `gai` checks for it and prints
+   `⚠ #34 is still closed by prose left in the PR body` with the offending line
+   and its number. It will not rewrite your prose — edit that line by hand.
 3. **Offer a Claude session.** It asks `Start a Claude session on issue #123 with
    full context? [Y/n]`. Answer yes and it pulls the issue's title, labels,
    description and every comment through `gh`, then prompts for one optional line
@@ -126,6 +146,8 @@ Flags and edge cases:
 - `--dry-run` makes **no GitHub writes at all** — it never opens a PR, never edits a
   PR title or body, and prints the composed prompt instead of launching Claude. It
   does print the title and body it *would* have written.
+- `--remove` (`-r`) detaches instead of attaching; combine with `--dry-run` to see
+  the resulting title and body before writing anything.
 - Answering `n` skips the session; the attach already happened.
 - No TTY (piped or scripted) skips the offer and prints the manual command.
 - No `claude` on `PATH` skips the offer silently.
