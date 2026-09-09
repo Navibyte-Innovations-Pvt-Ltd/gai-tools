@@ -207,6 +207,11 @@ $_issues"
 # Compose the full issue thread (title, labels, body, comments) into a prompt and
 # hand it to an interactive Claude session, so the user never re-types the URL.
 _gai_issue_claude_session() {
+  # Detaching an issue is the opposite of starting work on it — never offer.
+  if [[ "$_issue_remove" == "true" ]]; then
+    return 0
+  fi
+
   if ! command -v claude > /dev/null 2>&1; then
     return 0
   fi
@@ -272,11 +277,13 @@ ${_extra}"
 if [[ "${1:-}" == "issue" ]]; then
   _issue_arg=""
   _issue_dry_run=false
+  _issue_remove=false
 
   shift
   for _arg in "$@"; do
     case "$_arg" in
       --dry-run|-n) _issue_dry_run=true ;;
+      --remove|-r)  _issue_remove=true ;;
       -*)
         echo "error: unknown flag for 'gai issue': $_arg" >&2
         exit 1
@@ -290,7 +297,7 @@ if [[ "${1:-}" == "issue" ]]; then
   done
 
   if [[ -z "$_issue_arg" ]]; then
-    echo "Usage: gai issue <issue-number|github-issue-url> [--dry-run]" >&2
+    echo "Usage: gai issue <issue-number|github-issue-url> [--remove] [--dry-run]" >&2
     exit 1
   fi
 
@@ -342,6 +349,13 @@ if [[ "${1:-}" == "issue" ]]; then
   # Nothing to attach to — open a PR first so the issue has a home.
   if [[ ${#_pr_list[@]} -eq 0 ]]; then
     echo "No open PRs in ${_issue_repo}."
+
+    # Nothing to detach from, and opening a PR to remove an issue from it is
+    # nonsense — bail before the creation prompt.
+    if [[ "$_issue_remove" == "true" ]]; then
+      echo "error: --remove needs an open PR to remove #${_issue_num} from." >&2
+      exit 1
+    fi
 
     # --dry-run must never push a branch or open a PR.
     if [[ "$_issue_dry_run" == "true" ]]; then
@@ -437,11 +451,24 @@ for c in (d.get('commits') or [])[:40]:
   _close_re='(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]+#[0-9]+'
   _prev_nums=$(printf '%s\n' "$_pr_body" | grep -ioE "$_close_re" | grep -oE '[0-9]+' || true)
 
-  # First-seen order, new issue last.
-  _all_nums=$(printf '%s\n%s\n' "$_prev_nums" "$_issue_num" | grep -E '^[0-9]+$' | awk '!seen[$0]++')
+  if [[ "$_issue_remove" == "true" ]]; then
+    if ! printf '%s\n' "$_prev_nums" | grep -qx "$_issue_num"; then
+      echo "→ Issue #$_issue_num is not referenced in PR #$_pr_num — nothing to remove."
+      exit 0
+    fi
 
-  if printf '%s\n' "$_prev_nums" | grep -qx "$_issue_num"; then
-    echo "→ Issue #$_issue_num already referenced in PR #$_pr_num — refreshing title and body."
+    # || true: with the last remaining number filtered out grep exits 1, and
+    # set -e would kill the script right where an empty list is the point.
+    _all_nums=$(printf '%s\n' "$_prev_nums" | grep -E '^[0-9]+$' | awk '!seen[$0]++' \
+      | grep -vFx "$_issue_num" || true)
+    echo "→ Removing #$_issue_num from PR #$_pr_num."
+  else
+    # First-seen order, new issue last.
+    _all_nums=$(printf '%s\n%s\n' "$_prev_nums" "$_issue_num" | grep -E '^[0-9]+$' | awk '!seen[$0]++')
+
+    if printf '%s\n' "$_prev_nums" | grep -qx "$_issue_num"; then
+      echo "→ Issue #$_issue_num already referenced in PR #$_pr_num — refreshing title and body."
+    fi
   fi
 
   # Strip the old closing region so it can be rebuilt in full, and drop the
@@ -451,12 +478,35 @@ for c in (d.get('commits') or [])[:40]:
     | grep -v '^<!-- gai:closes -->$' \
     | python3 -c "import sys; print(sys.stdin.read().rstrip())" || true)
 
-  # Rendered once: "#9 #12 #31", no trailing blank.
-  _nums_pretty=$(echo "$_all_nums" | sed 's/^/#/' | tr '\n' ' ' | sed 's/ *$//')
+  # The collect regex is unanchored while the strip regex is whole-line only, so
+  # a mid-sentence "also fixes #34" survives the rebuild — under --remove that is
+  # a silent failure: the canonical line goes, GitHub still auto-closes the issue.
+  if [[ "$_issue_remove" == "true" ]]; then
+    # One pass with the number baked in: two chained greps would match the
+    # keyword on one reference and the number on another ("Closes #12, see #34").
+    _stray=$(printf '%s\n' "$_pr_body_clean" \
+      | grep -iE "(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]+#${_issue_num}([^0-9]|\$)" || true)
+    if [[ -n "$_stray" ]]; then
+      echo "⚠ #${_issue_num} is still closed by prose left in the PR body — edit it by hand:"
+      printf '%s\n' "$_stray" | sed 's/^/    /'
+    fi
+  fi
+
+  # Rendered once: "#9 #12 #31", no trailing blank. Empty once the last issue is
+  # removed — every consumer below has to cope with that.
+  if [[ -n "$_all_nums" ]]; then
+    _nums_pretty=$(echo "$_all_nums" | sed 's/^/#/' | tr '\n' ' ' | sed 's/ *$//')
+  else
+    _nums_pretty=""
+  fi
 
   # Pull each linked issue's thread so the regenerated title and body describe
   # what the PR is actually for, not just what the commits happened to touch.
-  echo "→ Fetching context for issue(s): $_nums_pretty"
+  if [[ -n "$_nums_pretty" ]]; then
+    echo "→ Fetching context for issue(s): $_nums_pretty"
+  else
+    echo "→ No issues left linked — title and body fall back to the commit list."
+  fi
   _issues_ctx=""
   for _n in $_all_nums; do
     _one=$(gh issue view "$_n" --repo "$_issue_repo" --json title,body \
@@ -535,15 +585,21 @@ ${_one}
 
   # Canonical closing block, rebuilt from scratch every run so re-running with a
   # second issue keeps the first one's Closes line alongside the new one.
-  _closes_block="<!-- gai:closes -->"
-  for _n in $_all_nums; do
-    _closes_block="${_closes_block}
+  # Removing the last issue leaves nothing to close: ship a bare body rather
+  # than a dangling marker over an empty block.
+  if [[ -n "$_all_nums" ]]; then
+    _closes_block="<!-- gai:closes -->"
+    for _n in $_all_nums; do
+      _closes_block="${_closes_block}
 Closes #${_n}"
-  done
+    done
 
-  _final_body="${_new_body}
+    _final_body="${_new_body}
 
 ${_closes_block}"
+  else
+    _final_body="$_new_body"
+  fi
 
   if [[ "$_issue_dry_run" == "true" ]]; then
     echo ""
@@ -556,7 +612,11 @@ ${_closes_block}"
     if [[ -t 0 ]]; then
       echo ""
       echo "PR #${_pr_num} new title: $_new_title"
-      echo "Closes: $_nums_pretty"
+      if [[ -n "$_nums_pretty" ]]; then
+        echo "Closes: $_nums_pretty"
+      else
+        echo "Closes: (none)"
+      fi
       read -rp "Apply this title and body to PR #${_pr_num}? [Y/n] " _apply || true
       case "$_apply" in
         [Nn]*)
@@ -570,7 +630,14 @@ ${_closes_block}"
     gh pr edit "$_pr_num" --repo "$_issue_repo" \
       --title "$_new_title" \
       --body "$_final_body"
-    if [[ "$_rewrote" == "true" ]]; then
+    if [[ "$_issue_remove" == "true" ]]; then
+      _left="${_nums_pretty:-none}"
+      if [[ "$_rewrote" == "true" ]]; then
+        echo "✓ Updated PR #${_pr_num} — removed #${_issue_num}, rewrote title and body, still closes: $_left"
+      else
+        echo "✓ Updated PR #${_pr_num} — removed #${_issue_num}, still closes: $_left (title and body unchanged)"
+      fi
+    elif [[ "$_rewrote" == "true" ]]; then
       echo "✓ Updated PR #${_pr_num} — title, body, and Closes for $_nums_pretty"
     else
       echo "✓ Updated PR #${_pr_num} — Closes for $_nums_pretty (title and body unchanged)"
@@ -679,6 +746,8 @@ for arg in "$@"; do
       echo "                 previous 'Closes #N' and add the new one, then offer a Claude"
       echo "                 session seeded with the full issue thread."
       echo "                 A bare number resolves against the repo you are standing in."
+      echo "                 --remove (-r) detaches instead: drops that issue's 'Closes #N',"
+      echo "                 keeps the rest, and rewrites the title and body from what is left."
       echo "  pause        : stop auto-commit (gai pr / gai issue keep working)"
       echo "  resume       : re-enable auto-commit after 'gai pause'"
       echo "  remove       : uninstall gai/gai-watch (alias: uninstall)"
