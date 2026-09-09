@@ -9,6 +9,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) — [Semantic V
 ## [Unreleased]
 ### Added
 
+- feat(gai): `gai issue <n|url> --remove` (`-r`) detaches an issue attached by
+  mistake — it drops that issue's line from the `<!-- gai:closes -->` block, keeps
+  every other linked issue, and regenerates the PR title and body from the issues
+  that remain (the mistaken attach is usually what the old title was written from).
+  Removing the last linked issue drops the block and its marker entirely. It never
+  creates a PR and never offers a Claude session. Removing an issue the PR does not
+  reference prints `nothing to remove` and exits without touching the PR. Because a
+  closing reference buried in prose still auto-closes the issue on merge, a
+  surviving `…fixes #34…` sentence is reported with the offending line rather than
+  silently rewritten
+
 - feat(gai): `gai pr` on `main`/`master`/the default branch now offers to cut a
   feature branch instead of erroring out — `Branch name [dev] (n to abort):`, Enter
   takes `dev`, an existing branch is checked out rather than recreated, and a base
