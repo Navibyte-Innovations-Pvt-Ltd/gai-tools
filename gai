@@ -222,15 +222,13 @@ _gai_issue_claude_session() {
     return 0
   fi
 
-  echo ""
-  read -rp "Start a Claude session on issue #${_issue_num} with full context? [Y/n] " _claude_confirm || true
-  case "$_claude_confirm" in
-    [Nn]*)
-      echo "Skipped. Re-run any time: gai issue $_issue_url"
-      return 0
-      ;;
-  esac
+  # Answered in the question phase, before any of the slow work ran.
+  if [[ "${_ans_claude:-no}" != "yes" ]]; then
+    echo "Skipped Claude session. Re-run any time: gai issue $_issue_url"
+    return 0
+  fi
 
+  echo ""
   echo "→ Fetching issue #${_issue_num} context…"
   _issue_ctx=$(gh issue view "$_issue_num" --repo "$_issue_repo" \
     --json title,body,labels,comments \
@@ -247,8 +245,6 @@ _gai_issue_claude_session() {
     echo "error: could not fetch issue #${_issue_num} from ${_issue_repo}." >&2
     return 1
   fi
-
-  read -rp "Extra instructions (optional): " _extra || true
 
   _prompt="Work on GitHub issue #${_issue_num} in ${_issue_repo}.
 ${_issue_url}
@@ -346,8 +342,28 @@ if [[ "${1:-}" == "issue" ]]; then
     [[ -n "$_line" ]] && _pr_list+=("$_line")
   done < <(gh pr list --repo "$_issue_repo" --state open --json number,title --jq '.[] | "\(.number)|\(.title)"')
 
-  # Nothing to attach to — open a PR first so the issue has a home.
+  # ── question phase ──────────────────────────────────────────────────────────
+  # Everything the run needs to know is asked here, in one block, before the
+  # first slow step. The old flow asked between steps — create a PR, wait, name
+  # a branch, wait, watch two model runs, then answer three more prompts — so
+  # the user had to sit and watch a generation finish just to be asked the next
+  # question. Nothing below the phase prompts; it only reports.
+
+  # Defaults are the conservative ones, which is also exactly what a non-TTY run
+  # gets: attach the issue to an existing PR, touch nothing else.
+  _ans_create_pr=no
+  _ans_rewrite=no
+  _ans_claude=no
+  _extra=""
+
+  _tty=false
+  if [[ -t 0 ]]; then
+    _tty=true
+  fi
+
+  _need_new_pr=false
   if [[ ${#_pr_list[@]} -eq 0 ]]; then
+    _need_new_pr=true
     echo "No open PRs in ${_issue_repo}."
 
     # Nothing to detach from, and opening a PR to remove an issue from it is
@@ -357,66 +373,58 @@ if [[ "${1:-}" == "issue" ]]; then
       exit 1
     fi
 
-    # --dry-run must never push a branch or open a PR.
-    if [[ "$_issue_dry_run" == "true" ]]; then
-      echo "dry run: would create a PR via 'gai pr', then attach #${_issue_num} to it."
-      _gai_issue_claude_session
-      exit 0
+    # Fail on the wrong-repo cases before asking anything: a question the run
+    # cannot act on is worse than no question.
+    if [[ "$_issue_dry_run" != "true" && "$_tty" == "true" ]]; then
+      _cwd_repo=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || true)
+
+      if [[ -z "$_cwd_repo" ]]; then
+        echo "error: not inside a GitHub repository — cd into ${_issue_repo} and re-run." >&2
+        exit 1
+      fi
+
+      if [[ "$_cwd_repo" != "$_issue_repo" ]]; then
+        echo "error: you are in ${_cwd_repo}, but issue #${_issue_num} lives in ${_issue_repo}." >&2
+        echo "  cd into ${_issue_repo} and re-run." >&2
+        exit 1
+      fi
     fi
 
-    if [[ ! -t 0 ]]; then
+    # --dry-run writes nothing either way, so it has nothing to confirm.
+    if [[ "$_tty" != "true" && "$_issue_dry_run" != "true" ]]; then
       echo "error: not a TTY — cannot confirm PR creation. Run 'gai pr' first." >&2
-      exit 1
-    fi
-
-    read -rp "Create one now? [Y/n] " _mk_pr || true
-    case "$_mk_pr" in
-      [Nn]*)
-        echo "Skipped PR creation — issue #${_issue_num} not attached."
-        _gai_issue_claude_session
-        exit 0
-        ;;
-    esac
-
-    _cwd_repo=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || true)
-
-    if [[ -z "$_cwd_repo" ]]; then
-      echo "error: not inside a GitHub repository — cd into ${_issue_repo} and re-run." >&2
-      exit 1
-    fi
-
-    if [[ "$_cwd_repo" != "$_issue_repo" ]]; then
-      echo "error: you are in ${_cwd_repo}, but issue #${_issue_num} lives in ${_issue_repo}." >&2
-      echo "  cd into ${_issue_repo} and re-run." >&2
-      exit 1
-    fi
-
-    if ! "$0" pr; then
-      echo "error: PR creation failed — issue #${_issue_num} not attached." >&2
-      exit 1
-    fi
-
-    echo ""
-    echo "→ Re-fetching open PRs for ${_issue_repo}…"
-
-    _pr_list=()
-    while IFS= read -r _line; do
-      [[ -n "$_line" ]] && _pr_list+=("$_line")
-    done < <(gh pr list --repo "$_issue_repo" --state open --json number,title --jq '.[] | "\(.number)|\(.title)"')
-
-    if [[ ${#_pr_list[@]} -eq 0 ]]; then
-      echo "error: PR created but it is not showing up in the open-PR list." >&2
       exit 1
     fi
   fi
 
+  # The only PR there is needs no question — resolve it before the batch opens.
   _pr_num=""
+  _pr_title=""
   if [[ ${#_pr_list[@]} -eq 1 ]]; then
     _pr_num=$(echo "${_pr_list[0]}" | cut -d'|' -f1)
     _pr_title=$(echo "${_pr_list[0]}" | cut -d'|' -f2)
     echo "→ Auto-selecting PR #$_pr_num: $_pr_title"
-  else
+  fi
+
+  if [[ "$_tty" == "true" ]]; then
     echo ""
+    echo "── a few questions, then it runs on its own ──"
+  fi
+
+  # Which PR. A menu is a question, so it belongs in the batch alongside the
+  # rest — never after a generation has already run.
+  if [[ "$_need_new_pr" == "true" ]]; then
+    if [[ "$_tty" == "true" ]]; then
+      read -rp "Create a PR for #${_issue_num}? [Y/n] " _mk_pr || true
+      case "$_mk_pr" in
+        [Nn]*) _ans_create_pr=no ;;
+        *)     _ans_create_pr=yes ;;
+      esac
+    else
+      # Only --dry-run reaches here; a real headless run errored out above.
+      _ans_create_pr=yes
+    fi
+  elif [[ ${#_pr_list[@]} -gt 1 ]]; then
     echo "Multiple open PRs — select one:"
     _pr_options=()
     for _entry in "${_pr_list[@]}"; do
@@ -428,6 +436,71 @@ if [[ "${1:-}" == "issue" ]]; then
     _idx=$_MENU_RESULT
     _pr_num=$(echo "${_pr_list[$_idx]}" | cut -d'|' -f1)
     _pr_title=$(echo "${_pr_list[$_idx]}" | cut -d'|' -f2)
+  fi
+
+  # Asked before the model runs, not after: waiting on a generation only to be
+  # asked whether it was wanted is the wait this flow exists to remove. Saying
+  # yes here is the approval — the result is applied without a second prompt.
+  if [[ "$_tty" == "true" ]] && [[ "$_need_new_pr" != "true" || "$_ans_create_pr" == "yes" ]]; then
+    if [[ "$_issue_remove" == "true" ]]; then
+      read -rp "Rewrite the PR title and body from the issues that remain? [Y/n] " _rw || true
+    else
+      read -rp "Rewrite the PR title and body from the issue thread? [Y/n] " _rw || true
+    fi
+    case "$_rw" in
+      [Nn]*) _ans_rewrite=no ;;
+      *)     _ans_rewrite=yes ;;
+    esac
+  fi
+
+  # Detaching an issue is the opposite of starting work on it — never offer.
+  if [[ "$_tty" == "true" && "$_issue_remove" != "true" ]] && command -v claude > /dev/null 2>&1; then
+    read -rp "Start a Claude session on #${_issue_num} when this is done? [Y/n] " _cs || true
+    case "$_cs" in
+      [Nn]*) _ans_claude=no ;;
+      *)
+        _ans_claude=yes
+        read -rp "Extra instructions for Claude (optional): " _extra || true
+        ;;
+    esac
+  fi
+
+  # ── execute ─────────────────────────────────────────────────────────────────
+
+  if [[ "$_need_new_pr" == "true" ]]; then
+    if [[ "$_ans_create_pr" != "yes" ]]; then
+      echo "Skipped PR creation — issue #${_issue_num} not attached."
+      _gai_issue_claude_session
+      exit 0
+    fi
+
+    # --dry-run must never push a branch or open a PR.
+    if [[ "$_issue_dry_run" == "true" ]]; then
+      echo "dry run: would create a PR via 'gai pr', then attach #${_issue_num} to it."
+      _gai_issue_claude_session
+      exit 0
+    fi
+
+    # --no-generate: the title and body 'gai pr' would write are overwritten
+    # from the issue thread a few seconds later, so generating them there is a
+    # model run the user waits through and never sees. Its own two questions
+    # (branch name, empty commit) are asked immediately, with no slow step
+    # between them and the batch above.
+    if ! "$0" pr --no-generate; then
+      echo "error: PR creation failed — issue #${_issue_num} not attached." >&2
+      exit 1
+    fi
+
+    # The new PR is the one for the branch we are now standing on — asking
+    # GitHub for it directly beats re-listing every open PR and guessing.
+    _pr_num=$(gh pr view --json number,state --jq 'select(.state == "OPEN") | .number' 2>/dev/null || true)
+
+    if [[ -z "$_pr_num" ]]; then
+      echo "error: PR created but no open PR resolves for this branch." >&2
+      exit 1
+    fi
+
+    echo "→ Attaching #${_issue_num} to the new PR #${_pr_num}."
   fi
 
   # Everything below is sourced from the PR itself, never from local git: the
@@ -530,12 +603,14 @@ ${_one}
   # --dry-run is exempt — it writes nothing either way.
   if [[ ! -t 0 && "$_issue_dry_run" != "true" ]]; then
     echo "Not a TTY — updating the closing block only, leaving the title and body alone."
+  elif [[ "$_ans_rewrite" != "yes" ]]; then
+    echo "→ Keeping the existing title and body — updating the closing block only."
   elif _gai_ollama_up; then
     # Attaching the issue is the job; rewriting the title and body is a bonus.
     # One budget covers BOTH generations, so `gai issue` never stalls longer than
     # the user was told to expect — on a box with no spare GPU or RAM a 1.5b
     # model can grind for minutes.
-    _budget="${GAI_ISSUE_TIMEOUT:-15}"
+    _budget="${GAI_ISSUE_TIMEOUT:-40}"
     _deadline=$(( $(date +%s) + _budget ))
     _gen_title=""
     _gen_body=""
@@ -611,20 +686,12 @@ ${_closes_block}"
   else
     if [[ -t 0 ]]; then
       echo ""
-      echo "PR #${_pr_num} new title: $_new_title"
+      echo "PR #${_pr_num} title: $_new_title"
       if [[ -n "$_nums_pretty" ]]; then
         echo "Closes: $_nums_pretty"
       else
         echo "Closes: (none)"
       fi
-      read -rp "Apply this title and body to PR #${_pr_num}? [Y/n] " _apply || true
-      case "$_apply" in
-        [Nn]*)
-          echo "Skipped — PR #${_pr_num} left unchanged."
-          _gai_issue_claude_session
-          exit 0
-          ;;
-      esac
     fi
 
     gh pr edit "$_pr_num" --repo "$_issue_repo" \
@@ -649,6 +716,13 @@ ${_closes_block}"
 fi
 
 # ── flag parsing ──────────────────────────────────────────────────────────────
+
+# 'gai pr' answers: set by flag so 'gai issue' can drive a PR non-interactively
+# after collecting the same answers from the user up front.
+_pr_flag_branch=""
+_pr_flag_allow_empty=false
+_pr_assume_yes=false
+_pr_generate=true
 
 for arg in "$@"; do
   case "$arg" in
@@ -692,6 +766,18 @@ for arg in "$@"; do
       ;;
     pr)
       _gai_pr=true
+      ;;
+    --branch=*)
+      _pr_flag_branch="${arg#--branch=}"
+      ;;
+    --allow-empty)
+      _pr_flag_allow_empty=true
+      ;;
+    --no-generate)
+      _pr_generate=false
+      ;;
+    --yes|-y)
+      _pr_assume_yes=true
       ;;
     pause)
       mkdir -p "$HOME/.gai"
@@ -741,6 +827,9 @@ for arg in "$@"; do
       echo "  update       : pull latest version from GitHub"
       echo "  pr           : create a GitHub PR from current branch (requires gh CLI)."
       echo "                 On main/master it offers to cut a branch first (default: dev)."
+      echo "                 Every question is asked up front, then it runs unattended."
+      echo "                 --branch=<name>, --allow-empty, --yes, --no-generate answer"
+      echo "                 those questions ahead of time (used by 'gai issue')."
       echo "  issue <n|url>: attach a GitHub issue to an open PR (creates one if none open),"
       echo "                 rewrite the PR title and body from the issue thread, keep every"
       echo "                 previous 'Closes #N' and add the new one, then offer a Claude"
@@ -784,74 +873,138 @@ if [[ "${_gai_pr:-false}" == "true" ]]; then
   CURRENT_BRANCH=$(git branch --show-current)
   BASE_BRANCH=$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null || echo "main")
 
+  # ── plan phase ──────────────────────────────────────────────────────────────
+  # Every question is asked here, before the first slow step. They used to sit
+  # each right above the step it gated, which pinned the user to the terminal:
+  # answer, wait for a branch switch, answer, wait through two model runs. Now
+  # the run is decided in one block and executes without asking again.
+
+  # Fetched before the first question, not between the two: it is a network
+  # round trip, and a wait in the middle of the batch is the thing this phase
+  # exists to remove.
+  git fetch origin "$BASE_BRANCH" --quiet 2>/dev/null || true
+
   # A PR cannot be opened from the base branch. Rather than dead-ending here,
-  # offer to cut the feature branch the user was going to create anyway.
+  # cut the feature branch the user was going to create anyway.
+  _pr_branch=""
   if [[ "$CURRENT_BRANCH" == "$BASE_BRANCH" || "$CURRENT_BRANCH" == "main" || "$CURRENT_BRANCH" == "master" ]]; then
-    if [[ ! -t 0 ]]; then
+    if [[ -n "$_pr_flag_branch" ]]; then
+      _pr_branch="$_pr_flag_branch"
+    elif [[ "$_pr_assume_yes" == "true" ]]; then
+      _pr_branch="dev"
+    elif [[ -t 0 ]]; then
+      echo "On '$CURRENT_BRANCH' — a PR needs a feature branch."
+      read -rp "Branch name [dev] (n to abort): " _pr_branch || true
+      _pr_branch="${_pr_branch:-dev}"
+
+      case "$_pr_branch" in
+        [Nn]|[Nn][Oo])
+          echo "Aborted — still on '$CURRENT_BRANCH'." >&2
+          exit 1
+          ;;
+      esac
+    else
       echo "error: on branch '$CURRENT_BRANCH' — switch to a feature branch first." >&2
       exit 1
     fi
 
-    echo "On '$CURRENT_BRANCH' — a PR needs a feature branch."
-    read -rp "Branch name [dev] (n to abort): " _new_branch || true
-    _new_branch="${_new_branch:-dev}"
-
-    case "$_new_branch" in
-      [Nn]|[Nn][Oo])
-        echo "Aborted — still on '$CURRENT_BRANCH'." >&2
-        exit 1
-        ;;
-    esac
-
-    if [[ "$_new_branch" == "$BASE_BRANCH" || "$_new_branch" == "main" || "$_new_branch" == "master" ]]; then
-      echo "error: '$_new_branch' is a base branch — pick another name." >&2
+    if [[ "$_pr_branch" == "$BASE_BRANCH" || "$_pr_branch" == "main" || "$_pr_branch" == "master" ]]; then
+      echo "error: '$_pr_branch' is a base branch — pick another name." >&2
       exit 1
     fi
+  fi
 
-    if git show-ref --verify --quiet "refs/heads/$_new_branch"; then
-      echo "→ Branch '$_new_branch' already exists — switching to it."
-      git checkout "$_new_branch"
+  # Count against the branch we are going to end up on, not the one we are on
+  # now: an existing 'dev' can already be ahead while HEAD on main is not. The
+  # switch itself has to wait until every question is answered.
+  _count_ref="HEAD"
+  if [[ -n "$_pr_branch" ]] && git show-ref --verify --quiet "refs/heads/$_pr_branch"; then
+    _count_ref="refs/heads/$_pr_branch"
+  fi
+  PR_COMMITS=$(git log "origin/${BASE_BRANCH}..${_count_ref}" --oneline 2>/dev/null)
+
+  _pr_empty=false
+  if [[ -z "$PR_COMMITS" ]]; then
+    if [[ "$_pr_flag_allow_empty" == "true" || "$_pr_assume_yes" == "true" ]]; then
+      _pr_empty=true
+    elif [[ -t 0 ]]; then
+      echo "No commits ahead of 'origin/$BASE_BRANCH' — nothing to diff."
+      read -rp "Create an empty commit to open the PR anyway (e.g. for issue tracking)? [Y/n] " _empty_confirm || true
+      case "$_empty_confirm" in
+        [Nn]*)
+          echo "Aborted." >&2
+          exit 1
+          ;;
+      esac
+      _pr_empty=true
     else
-      echo "→ Creating branch '$_new_branch'…"
-      git checkout -b "$_new_branch"
+      echo "error: no commits ahead of 'origin/$BASE_BRANCH' — nothing to diff." >&2
+      echo "  Re-run with --allow-empty to open the PR on an empty commit." >&2
+      exit 1
+    fi
+  fi
+
+  # Ollama only matters if we are going to generate. 'gai issue' passes
+  # --no-generate because it rewrites the title and body from the issue thread
+  # seconds later — generating here is work thrown away, and a dead Ollama must
+  # not sink a run whose questions are all already answered.
+  if [[ "$_pr_generate" == "true" ]]; then
+    if ! curl -s --connect-timeout 2 "http://localhost:11434" > /dev/null 2>&1; then
+      echo "error: Ollama not running." >&2
+      echo "  Start:   ollama serve" >&2
+      echo "  Install: brew install ollama && ollama pull $MODEL" >&2
+      exit 1
+    fi
+  fi
+
+  # ── execute ─────────────────────────────────────────────────────────────────
+  # Nothing below asks anything. It only reports what it is doing.
+
+  _plan=""
+  if [[ -n "$_pr_branch" ]]; then
+    _plan="${_plan}branch ${_pr_branch} → "
+  fi
+  if [[ "$_pr_empty" == "true" ]]; then
+    _plan="${_plan}empty commit → "
+  fi
+  if [[ "$_pr_generate" == "true" ]]; then
+    _plan="${_plan}title and body → "
+  fi
+  echo "→ Plan: ${_plan}push → open PR against ${BASE_BRANCH}"
+
+  if [[ -n "$_pr_branch" ]]; then
+    if git show-ref --verify --quiet "refs/heads/$_pr_branch"; then
+      echo "→ Branch '$_pr_branch' already exists — switching to it."
+      git checkout "$_pr_branch"
+    else
+      echo "→ Creating branch '$_pr_branch'…"
+      git checkout -b "$_pr_branch"
     fi
 
     CURRENT_BRANCH=$(git branch --show-current)
   fi
 
-  git fetch origin "$BASE_BRANCH" --quiet 2>/dev/null || true
-  PR_COMMITS=$(git log "origin/$BASE_BRANCH"..HEAD --oneline 2>/dev/null)
-  if [[ -z "$PR_COMMITS" ]]; then
-    echo "No commits ahead of 'origin/$BASE_BRANCH' — nothing to diff." >&2
-    read -rp "Create an empty commit to open the PR anyway (e.g. for issue tracking)? [Y/n] " _empty_confirm || true
-    case "$_empty_confirm" in
-      [Nn]*)
-        echo "Aborted." >&2
-        exit 1
-        ;;
-    esac
+  if [[ "$_pr_empty" == "true" ]]; then
+    echo "→ Creating empty commit…"
     git commit --allow-empty -m "chore($CURRENT_BRANCH): open PR for issue tracking"
     PR_COMMITS=$(git log "origin/$BASE_BRANCH"..HEAD --oneline 2>/dev/null)
   fi
 
-  if ! curl -s --connect-timeout 2 "http://localhost:11434" > /dev/null 2>&1; then
-    echo "error: Ollama not running." >&2
-    echo "  Start:   ollama serve" >&2
-    echo "  Install: brew install ollama && ollama pull $MODEL" >&2
-    exit 1
-  fi
-
   PR_DIFF_STAT=$(git diff --no-ext-diff "origin/$BASE_BRANCH"...HEAD --stat 2>/dev/null)
 
-  echo "→ Generating PR title…"
-  PR_TITLE=$(_gai_gen_pr_title "$CURRENT_BRANCH" "$PR_COMMITS") || true
+  PR_TITLE=""
+  PR_BODY=""
+  if [[ "$_pr_generate" == "true" ]]; then
+    echo "→ Generating PR title…"
+    PR_TITLE=$(_gai_gen_pr_title "$CURRENT_BRANCH" "$PR_COMMITS") || true
+
+    echo "→ Generating PR body…"
+    PR_BODY=$(_gai_gen_pr_body "$CURRENT_BRANCH" "$PR_COMMITS" "$PR_DIFF_STAT") || true
+  fi
 
   if [[ -z "$PR_TITLE" ]]; then
     PR_TITLE="feat(${CURRENT_BRANCH}): changes from branch"
   fi
-
-  echo "→ Generating PR body…"
-  PR_BODY=$(_gai_gen_pr_body "$CURRENT_BRANCH" "$PR_COMMITS" "$PR_DIFF_STAT") || true
 
   if [[ -z "$PR_BODY" ]]; then
     _pr_bullets=""
