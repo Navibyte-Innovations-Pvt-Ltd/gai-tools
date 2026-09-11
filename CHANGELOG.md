@@ -74,6 +74,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) — [Semantic V
 
 ### Fixed
 
+- fix(gai): a model reply wrapped in an unclosed ```` ```markdown ```` fence no
+  longer hides the PR's `Closes` block. GitHub ignores closing keywords inside
+  code, so practise_stack PR #1828 lost all seven linked issues while `gai issue`
+  still printed ✓. Bodies are now unwrapped, and any fence or `<!--` left open is
+  closed before the block is appended — including a body an earlier run already
+  broke. `gai issue` then asks GitHub whether the issue is really linked and
+  prints `⚠` when it is not
 - fix(gai): two `gai issue` runs on the same PR no longer drop each other's
   `Closes` line. Each run wrote back the body it had read up to a minute earlier
   (issue threads plus the 40 s model budget), so the later write erased the
