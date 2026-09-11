@@ -132,6 +132,13 @@ Then it executes, in order:
    both issues and whose closing block lists both. Re-running on an already-attached
    issue is a refresh, not a no-op.
 
+   **Several runs on one PR at once are safe.** Each run re-reads the PR just
+   before writing, under a per-PR lock in `/tmp`, and applies only its own change
+   (add or drop one issue) to the body it finds then. A run that meets the lock
+   prints `Another gai issue is writing PR #N — waiting for it…` and goes next.
+   Before this, overlapping runs each wrote back the body they had read up to a
+   minute earlier, so the later one silently dropped the other's `Closes` line.
+
    **Attached the wrong issue?** `gai issue 34 --remove` (or `-r`) is the undo.
    It drops `#34` from the closing block, keeps every other issue, and rewrites
    the title and body from the issues that *remain* — the mistaken attach is
