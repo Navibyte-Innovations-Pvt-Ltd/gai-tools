@@ -319,6 +319,59 @@ _gai_img_filter() {
   done <<< "$_img_saved"
 }
 
+# ── per-PR write lock for `gai issue` ─────────────────────────────────────────
+# A `gai issue` run reads the PR body, spends up to a minute on issue threads and
+# the model, then writes the whole body back. Two runs on one PR overlapped, so
+# the later write carried a body read before the earlier one landed and silently
+# dropped its Closes line (#1811 on practise_stack PR #1825). The body is now
+# re-read under this lock right before the write, so runs take turns for the
+# second that takes instead of overwriting each other.
+# Unlike the commit lock this one waits: skipping would lose the attach outright.
+
+_pr_lock=""
+
+_gai_pr_unlock() {
+  if [[ -n "$_pr_lock" ]]; then
+    rm -rf "$_pr_lock" 2> /dev/null || true
+    _pr_lock=""
+  fi
+}
+
+_gai_pr_lock() {
+  local _dir _owner _waited=0
+  _dir="/tmp/gai-pr-$(echo "${_issue_repo}#${_pr_num}" | md5).lock"
+  while ! mkdir "$_dir" 2> /dev/null; do
+    _owner=$(cat "$_dir/pid" 2> /dev/null || true)
+    # No pid yet means the owner is between mkdir and writing it — keep waiting.
+    if [[ -n "$_owner" ]] && ! kill -0 "$_owner" 2> /dev/null; then
+      rm -rf "$_dir" 2> /dev/null || true
+      continue
+    fi
+    if [[ $_waited -eq 0 ]]; then
+      echo "→ Another gai issue is writing PR #${_pr_num} — waiting for it…"
+    fi
+    if [[ $_waited -ge 150 ]]; then
+      echo "⚠ PR #${_pr_num} still locked after 30s — writing without the lock."
+      return 0
+    fi
+    sleep 0.2
+    _waited=$((_waited + 1))
+  done
+  echo $$ > "$_dir/pid"
+  _pr_lock="$_dir"
+  trap _gai_pr_unlock EXIT
+  trap '_gai_pr_unlock; exit 130' INT TERM
+}
+
+# The body minus its closing lines and gai marker, trailing blanks trimmed.
+# Needs _close_re, which the issue flow sets before calling it.
+_gai_strip_closes() {
+  printf '%s\n' "$1" \
+    | grep -viE "^[[:space:]]*${_close_re}[[:space:]]*$" \
+    | grep -v '^<!-- gai:closes -->$' \
+    | python3 -c "import sys; print(sys.stdin.read().rstrip())" || true
+}
+
 # ── issue subcommand ──────────────────────────────────────────────────────────
 
 # Compose the full issue thread (title, labels, body, comments) into a prompt and
@@ -711,10 +764,7 @@ for c in (d.get('commits') or [])[:40]:
 
   # Strip the old closing region so it can be rebuilt in full, and drop the
   # trailing blank lines that stripping leaves behind.
-  _pr_body_clean=$(printf '%s\n' "$_pr_body" \
-    | grep -viE "^[[:space:]]*${_close_re}[[:space:]]*$" \
-    | grep -v '^<!-- gai:closes -->$' \
-    | python3 -c "import sys; print(sys.stdin.read().rstrip())" || true)
+  _pr_body_clean=$(_gai_strip_closes "$_pr_body")
 
   # The collect regex is unanchored while the strip regex is whole-line only, so
   # a mid-sentence "also fixes #34" survives the rebuild — under --remove that is
@@ -823,6 +873,43 @@ ${_one}
     echo "  Start it (ollama serve) and re-run to regenerate them."
   fi
 
+  # Everything above ran against the PR as it was when this run started — issue
+  # threads and up to 40 s of model ago — and another `gai issue` may have
+  # written since. Re-read it under the lock and apply only this run's change
+  # (add or drop one issue) to what is there now. A plain union with the old
+  # list would resurrect an issue another run's --remove just dropped.
+  if [[ "$_issue_dry_run" != "true" ]]; then
+    _gai_pr_lock
+  fi
+  _fresh_json=$(gh pr view "$_pr_num" --repo "$_issue_repo" --json title,body 2> /dev/null || true)
+  if [[ -n "$_fresh_json" ]]; then
+    _fresh_body=$(echo "$_fresh_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('body') or '')")
+    _fresh_nums=$(printf '%s\n' "$_fresh_body" | grep -ioE "$_close_re" | grep -oE '[0-9]+' || true)
+    if [[ "$_issue_remove" == "true" ]]; then
+      _merged=$(printf '%s\n' "$_fresh_nums" | grep -E '^[0-9]+$' | awk '!seen[$0]++' \
+        | grep -vFx "$_issue_num" || true)
+    else
+      _merged=$(printf '%s\n%s\n' "$_fresh_nums" "$_issue_num" | grep -E '^[0-9]+$' | awk '!seen[$0]++')
+    fi
+
+    if [[ "$_merged" != "$_all_nums" ]]; then
+      echo "→ PR #${_pr_num} changed while this ran — keeping the issues written meanwhile."
+    fi
+    _all_nums="$_merged"
+    if [[ -n "$_all_nums" ]]; then
+      _nums_pretty=$(echo "$_all_nums" | sed 's/^/#/' | tr '\n' ' ' | sed 's/ *$//')
+    else
+      _nums_pretty=""
+    fi
+
+    # Not regenerated here, so the fresh title and prose win over the copy read
+    # at the start — they may be another run's freshly generated ones.
+    if [[ "$_rewrote" != "true" ]]; then
+      _new_title=$(echo "$_fresh_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('title') or '')")
+      _new_body=$(_gai_strip_closes "$_fresh_body")
+    fi
+  fi
+
   # Canonical closing block, rebuilt from scratch every run so re-running with a
   # second issue keeps the first one's Closes line alongside the new one.
   # Removing the last issue leaves nothing to close: ship a bare body rather
@@ -862,6 +949,13 @@ ${_closes_block}"
     gh pr edit "$_pr_num" --repo "$_issue_repo" \
       --title "$_new_title" \
       --body "$_final_body"
+
+    # Released by hand, not left to the EXIT trap: the Claude session below is an
+    # `exec`, which keeps this pid and skips the trap, so the lock would look
+    # alive and stall every other run for as long as that session is open.
+    _gai_pr_unlock
+    trap - EXIT INT TERM
+
     if [[ "$_issue_remove" == "true" ]]; then
       _left="${_nums_pretty:-none}"
       if [[ "$_rewrote" == "true" ]]; then
