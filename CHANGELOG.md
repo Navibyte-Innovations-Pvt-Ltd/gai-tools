@@ -68,6 +68,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) — [Semantic V
 
 ### Changed
 
+- change(gai): `gai issue` attaches first. The `Closes` line is saved a second
+  or two after the questions — before any issue thread is fetched or the model
+  runs — so the issue shows its linked PR right away (`✓ Attached #N to PR #M`).
+  The title and body rewrite follows as a second save; answer `n`, run with
+  Ollama down, or with no TTY and it is skipped, threads not even fetched
 - change(gai): `Create an empty commit to open the PR anyway?` now defaults to
   **yes** — pressing Enter creates the commit instead of aborting. The destructive
   `gai remove` confirmation still defaults to no
