@@ -74,6 +74,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) — [Semantic V
 
 ### Fixed
 
+- fix(gai): two `gai issue` runs on the same PR no longer drop each other's
+  `Closes` line. Each run wrote back the body it had read up to a minute earlier
+  (issue threads plus the 40 s model budget), so the later write erased the
+  earlier attach — #1811 vanished from practise_stack PR #1825 this way. The PR
+  is now re-read right before the write, under a per-PR lock in `/tmp`, and only
+  this run's change (add or drop one issue) is applied to what is there
 - fix(gai): a `read` prompt hitting EOF no longer kills the script under `set -e`;
   it falls through to the prompt's default instead of exiting mid-question
 - fix(gai): PR titles no longer echo the prompt's worked example back verbatim, stack
