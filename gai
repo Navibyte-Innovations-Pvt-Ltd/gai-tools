@@ -199,7 +199,13 @@ $_commits"
 $_issues"
   fi
 
-  _gai_ollama_gen "$_prompt"
+  # The prompt forbids wrapping the reply in backticks; a 1.5b model does it
+  # anyway. The status is kept separate so a timed-out call still reports one.
+  local _out
+  _out=$(_gai_ollama_gen "$_prompt") || return 1
+  if [[ -n "$_out" ]]; then
+    _gai_md_sanitize "$_out"
+  fi
 }
 
 # ── images for the Claude session ─────────────────────────────────────────────
@@ -370,6 +376,65 @@ _gai_strip_closes() {
     | grep -viE "^[[:space:]]*${_close_re}[[:space:]]*$" \
     | grep -v '^<!-- gai:closes -->$' \
     | python3 -c "import sys; print(sys.stdin.read().rstrip())" || true
+}
+
+# A PR body is untrusted markdown — model output, or whatever a human left there.
+# One that leaves a code fence or an HTML comment open swallows everything after
+# it, the Closes block included, and GitHub ignores closing keywords inside code:
+# practise_stack PR #1828 lost all seven linked issues to a ```markdown wrapper
+# the model opened and never closed. Idempotent, so it is safe to run twice.
+_gai_md_sanitize() {
+  python3 - "$1" << 'PY' || printf '%s\n' "$1"
+import re, sys
+
+lines = sys.argv[1].rstrip("\n").split("\n")
+while lines and not lines[0].strip():
+    lines.pop(0)
+while lines and not lines[-1].strip():
+    lines.pop()
+
+# Unwrap a fence around the whole reply: "```markdown" on top always counts; a
+# bare "```" only when the reply also ends on one, so a body that genuinely
+# opens with a code block keeps it.
+bare = re.compile(r"^\s*```\s*$")
+if lines and re.match(r"^\s*```\s*(markdown|md)\s*$", lines[0], re.I):
+    lines.pop(0)
+    if lines and bare.match(lines[-1]):
+        lines.pop()
+elif len(lines) > 1 and bare.match(lines[0]) and bare.match(lines[-1]):
+    lines = lines[1:-1]
+
+text = "\n".join(lines).strip("\n")
+
+# Close whatever is still open, so nothing appended after it is swallowed.
+fence = re.compile(r"^\s*(```|~~~)")
+if sum(1 for l in text.split("\n") if fence.match(l)) % 2:
+    text += "\n```"
+if text.count("<!--") > text.count("-->"):
+    text += "\n-->"
+print(text)
+PY
+}
+
+# `✓ Updated` only means gh accepted the edit. Ask GitHub whether it actually
+# links the issue: the link lags the edit by a second or two, and a Closes line
+# it cannot see (inside code, or a PR not aimed at the default branch) never
+# links at all.
+_gai_verify_linked() {
+  local _try _linked
+  for _try in 1 2 3 4 5; do
+    _linked=$(gh pr view "$_pr_num" --repo "$_issue_repo" --json closingIssuesReferences \
+      --jq '.closingIssuesReferences[].number' 2> /dev/null || true)
+    if printf '%s\n' "$_linked" | grep -qx "$_issue_num"; then
+      echo "✓ GitHub links #${_issue_num} to PR #${_pr_num}"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "⚠ GitHub is not linking #${_issue_num} to PR #${_pr_num}, though its Closes line is in the body."
+  echo "  It links only when the PR targets the default branch and the line is not inside"
+  echo "  a code block or HTML comment. Open the PR and check how the description renders."
+  return 0
 }
 
 # ── issue subcommand ──────────────────────────────────────────────────────────
@@ -910,6 +975,11 @@ ${_one}
     fi
   fi
 
+  # Whatever the prose came from — the model, or the PR as it stands, which may
+  # already be broken by an earlier run — close any fence or comment it leaves
+  # open, or the Closes block lands inside it and GitHub links nothing.
+  _new_body=$(_gai_md_sanitize "$_new_body")
+
   # Canonical closing block, rebuilt from scratch every run so re-running with a
   # second issue keeps the first one's Closes line alongside the new one.
   # Removing the last issue leaves nothing to close: ship a bare body rather
@@ -967,6 +1037,10 @@ ${_closes_block}"
       echo "✓ Updated PR #${_pr_num} — title, body, and Closes for $_nums_pretty"
     else
       echo "✓ Updated PR #${_pr_num} — Closes for $_nums_pretty (title and body unchanged)"
+    fi
+
+    if [[ "$_issue_remove" != "true" ]]; then
+      _gai_verify_linked
     fi
   fi
 
