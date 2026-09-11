@@ -68,12 +68,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) — [Semantic V
 
 ### Changed
 
+- change(gai): `gai issue` attaches first. The `Closes` line is saved a second
+  or two after the questions — before any issue thread is fetched or the model
+  runs — so the issue shows its linked PR right away (`✓ Attached #N to PR #M`).
+  The title and body rewrite follows as a second save; answer `n`, run with
+  Ollama down, or with no TTY and it is skipped, threads not even fetched
 - change(gai): `Create an empty commit to open the PR anyway?` now defaults to
   **yes** — pressing Enter creates the commit instead of aborting. The destructive
   `gai remove` confirmation still defaults to no
 
 ### Fixed
 
+- fix(gai): a model reply wrapped in an unclosed ```` ```markdown ```` fence no
+  longer hides the PR's `Closes` block. GitHub ignores closing keywords inside
+  code, so practise_stack PR #1828 lost all seven linked issues while `gai issue`
+  still printed ✓. Bodies are now unwrapped, and any fence or `<!--` left open is
+  closed before the block is appended — including a body an earlier run already
+  broke. `gai issue` then asks GitHub whether the issue is really linked and
+  prints `⚠` when it is not
 - fix(gai): two `gai issue` runs on the same PR no longer drop each other's
   `Closes` line. Each run wrote back the body it had read up to a minute earlier
   (issue threads plus the 40 s model budget), so the later write erased the

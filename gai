@@ -199,7 +199,13 @@ $_commits"
 $_issues"
   fi
 
-  _gai_ollama_gen "$_prompt"
+  # The prompt forbids wrapping the reply in backticks; a 1.5b model does it
+  # anyway. The status is kept separate so a timed-out call still reports one.
+  local _out
+  _out=$(_gai_ollama_gen "$_prompt") || return 1
+  if [[ -n "$_out" ]]; then
+    _gai_md_sanitize "$_out"
+  fi
 }
 
 # ── images for the Claude session ─────────────────────────────────────────────
@@ -370,6 +376,169 @@ _gai_strip_closes() {
     | grep -viE "^[[:space:]]*${_close_re}[[:space:]]*$" \
     | grep -v '^<!-- gai:closes -->$' \
     | python3 -c "import sys; print(sys.stdin.read().rstrip())" || true
+}
+
+# A PR body is untrusted markdown — model output, or whatever a human left there.
+# One that leaves a code fence or an HTML comment open swallows everything after
+# it, the Closes block included, and GitHub ignores closing keywords inside code:
+# practise_stack PR #1828 lost all seven linked issues to a ```markdown wrapper
+# the model opened and never closed. Idempotent, so it is safe to run twice.
+_gai_md_sanitize() {
+  python3 - "$1" << 'PY' || printf '%s\n' "$1"
+import re, sys
+
+lines = sys.argv[1].rstrip("\n").split("\n")
+while lines and not lines[0].strip():
+    lines.pop(0)
+while lines and not lines[-1].strip():
+    lines.pop()
+
+# Unwrap a fence around the whole reply: "```markdown" on top always counts; a
+# bare "```" only when the reply also ends on one, so a body that genuinely
+# opens with a code block keeps it.
+bare = re.compile(r"^\s*```\s*$")
+if lines and re.match(r"^\s*```\s*(markdown|md)\s*$", lines[0], re.I):
+    lines.pop(0)
+    if lines and bare.match(lines[-1]):
+        lines.pop()
+elif len(lines) > 1 and bare.match(lines[0]) and bare.match(lines[-1]):
+    lines = lines[1:-1]
+
+text = "\n".join(lines).strip("\n")
+
+# Close whatever is still open, so nothing appended after it is swallowed.
+fence = re.compile(r"^\s*(```|~~~)")
+if sum(1 for l in text.split("\n") if fence.match(l)) % 2:
+    text += "\n```"
+if text.count("<!--") > text.count("-->"):
+    text += "\n-->"
+print(text)
+PY
+}
+
+# `✓ Updated` only means gh accepted the edit. Ask GitHub whether it actually
+# links the issue: the link lags the edit by a second or two, and a Closes line
+# it cannot see (inside code, or a PR not aimed at the default branch) never
+# links at all.
+# Pass "quiet" to print only the warning — used after the rewrite, when the
+# attach has already reported the link once.
+_gai_verify_linked() {
+  local _quiet="${1:-}" _try _linked
+  for _try in 1 2 3 4 5; do
+    _linked=$(gh pr view "$_pr_num" --repo "$_issue_repo" --json closingIssuesReferences \
+      --jq '.closingIssuesReferences[].number' 2> /dev/null || true)
+    if printf '%s\n' "$_linked" | grep -qx "$_issue_num"; then
+      if [[ -z "$_quiet" ]]; then
+        echo "✓ GitHub links #${_issue_num} to PR #${_pr_num}"
+      fi
+      return 0
+    fi
+    sleep 1
+  done
+  echo "⚠ GitHub is not linking #${_issue_num} to PR #${_pr_num}, though its Closes line is in the body."
+  echo "  It links only when the PR targets the default branch and the line is not inside"
+  echo "  a code block or HTML comment. Open the PR and check how the description renders."
+  return 0
+}
+
+# Save the PR under the lock. `gai issue` calls this twice: "attach" straight
+# after reading the PR, with the prose as it stands, so the issue shows a linked
+# PR within seconds; then "rewrite", only once the model has produced a new
+# title and body. Both re-read the PR first and apply just this run's change
+# (add or drop one issue) to what is there now — generation takes up to a minute
+# and another `gai issue` may have written in between. A plain union with the
+# old list would resurrect an issue another run's --remove just dropped.
+# Reads and sets the issue flow's globals (_all_nums, _new_title, _new_body…).
+_gai_pr_write() {
+  local _phase="$1"
+  if [[ "$_issue_dry_run" != "true" ]]; then
+    _gai_pr_lock
+  fi
+  _fresh_json=$(gh pr view "$_pr_num" --repo "$_issue_repo" --json title,body 2> /dev/null || true)
+  if [[ -n "$_fresh_json" ]]; then
+    _fresh_body=$(echo "$_fresh_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('body') or '')")
+    _fresh_nums=$(printf '%s\n' "$_fresh_body" | grep -ioE "$_close_re" | grep -oE '[0-9]+' || true)
+    if [[ "$_issue_remove" == "true" ]]; then
+      _merged=$(printf '%s\n' "$_fresh_nums" | grep -E '^[0-9]+$' | awk '!seen[$0]++' \
+        | grep -vFx "$_issue_num" || true)
+    else
+      _merged=$(printf '%s\n%s\n' "$_fresh_nums" "$_issue_num" | grep -E '^[0-9]+$' | awk '!seen[$0]++')
+    fi
+
+    if [[ "$_merged" != "$_all_nums" ]]; then
+      echo "→ PR #${_pr_num} changed while this ran — keeping the issues written meanwhile."
+    fi
+    _all_nums="$_merged"
+    if [[ -n "$_all_nums" ]]; then
+      _nums_pretty=$(echo "$_all_nums" | sed 's/^/#/' | tr '\n' ' ' | sed 's/ *$//')
+    else
+      _nums_pretty=""
+    fi
+
+    # Not regenerated here, so the fresh title and prose win over the copy read
+    # at the start — they may be another run's freshly generated ones.
+    if [[ "$_rewrote" != "true" ]]; then
+      _new_title=$(echo "$_fresh_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('title') or '')")
+      _new_body=$(_gai_strip_closes "$_fresh_body")
+    fi
+  fi
+
+  # Whatever the prose came from — the model, or the PR as it stands, which may
+  # already be broken by an earlier run — close any fence or comment it leaves
+  # open, or the Closes block lands inside it and GitHub links nothing.
+  _new_body=$(_gai_md_sanitize "$_new_body")
+
+  # Canonical closing block, rebuilt from scratch every run so re-running with a
+  # second issue keeps the first one's Closes line alongside the new one.
+  # Removing the last issue leaves nothing to close: ship a bare body rather
+  # than a dangling marker over an empty block.
+  if [[ -n "$_all_nums" ]]; then
+    _closes_block="<!-- gai:closes -->"
+    for _n in $_all_nums; do
+      _closes_block="${_closes_block}
+Closes #${_n}"
+    done
+
+    _final_body="${_new_body}
+
+${_closes_block}"
+  else
+    _final_body="$_new_body"
+  fi
+
+  if [[ "$_issue_dry_run" == "true" ]]; then
+    echo ""
+    echo "── dry run: after the ${_phase}, PR #${_pr_num} would be ──"
+    echo "Title: $_new_title"
+    echo ""
+    echo "$_final_body"
+    echo "─────────────────────────────────────────"
+    return 0
+  fi
+
+  gh pr edit "$_pr_num" --repo "$_issue_repo" \
+    --title "$_new_title" \
+    --body "$_final_body" > /dev/null
+
+  # Released by hand, not left to the EXIT trap: the Claude session at the end
+  # is an `exec`, which keeps this pid and skips the trap, so the lock would look
+  # alive and stall every other run for as long as that session is open.
+  _gai_pr_unlock
+  trap - EXIT INT TERM
+
+  if [[ "$_phase" == "attach" ]]; then
+    if [[ "$_issue_remove" == "true" ]]; then
+      echo "✓ Removed #${_issue_num} from PR #${_pr_num} — still closes: ${_nums_pretty:-none}"
+    else
+      echo "✓ Attached #${_issue_num} to PR #${_pr_num} — closes: $_nums_pretty"
+      _gai_verify_linked
+    fi
+  else
+    echo "✓ Rewrote PR #${_pr_num} title and body: $_new_title"
+    if [[ "$_issue_remove" != "true" ]]; then
+      _gai_verify_linked quiet
+    fi
+  fi
 }
 
 # ── issue subcommand ──────────────────────────────────────────────────────────
@@ -788,39 +957,45 @@ for c in (d.get('commits') or [])[:40]:
     _nums_pretty=""
   fi
 
-  # Pull each linked issue's thread so the regenerated title and body describe
-  # what the PR is actually for, not just what the commits happened to touch.
-  if [[ -n "$_nums_pretty" ]]; then
-    echo "→ Fetching context for issue(s): $_nums_pretty"
-  else
-    echo "→ No issues left linked — title and body fall back to the commit list."
-  fi
-  _issues_ctx=""
-  for _n in $_all_nums; do
-    _one=$(gh issue view "$_n" --repo "$_issue_repo" --json title,body \
-      --jq '"\(.title)\n\(.body // "")"' 2>/dev/null || true)
-    if [[ -n "$_one" ]]; then
-      # Cap each thread — a long issue body starves the model's context window.
-      _one=$(printf '%s' "$_one" | head -c 2000)
-      _issues_ctx="${_issues_ctx}### Issue #${_n}
-${_one}
-
-"
-    fi
-  done
-
+  # Attach first. Everything after this — each issue's thread, up to 40 s of
+  # model — only buys a nicer title and body, and it used to run before the
+  # Closes line was written, so the issue showed no linked PR until the model
+  # finished. Now the link lands in seconds and the rewrite follows.
   _new_title="$_pr_cur_title"
   _new_body="$_pr_body_clean"
   _rewrote=false
+  _gai_pr_write attach
 
   # Rewriting replaces a possibly hand-written title and body, so it never runs
-  # unattended: with no TTY to confirm at, only the closing block is updated.
+  # unattended: with no TTY to confirm at, the attach above is all that happens.
   # --dry-run is exempt — it writes nothing either way.
   if [[ ! -t 0 && "$_issue_dry_run" != "true" ]]; then
-    echo "Not a TTY — updating the closing block only, leaving the title and body alone."
+    echo "Not a TTY — leaving the title and body as they are."
   elif [[ "$_ans_rewrite" != "yes" ]]; then
-    echo "→ Keeping the existing title and body — updating the closing block only."
+    echo "→ Keeping the existing title and body."
   elif _gai_ollama_up; then
+    # Pull each linked issue's thread so the regenerated title and body describe
+    # what the PR is actually for, not just what the commits happened to touch.
+    # Only fetched here: with no rewrite coming they were a wait for nothing.
+    if [[ -n "$_nums_pretty" ]]; then
+      echo "→ Fetching context for issue(s): $_nums_pretty"
+    else
+      echo "→ No issues left linked — title and body fall back to the commit list."
+    fi
+    _issues_ctx=""
+    for _n in $_all_nums; do
+      _one=$(gh issue view "$_n" --repo "$_issue_repo" --json title,body \
+        --jq '"\(.title)\n\(.body // "")"' 2>/dev/null || true)
+      if [[ -n "$_one" ]]; then
+        # Cap each thread — a long issue body starves the model's context window.
+        _one=$(printf '%s' "$_one" | head -c 2000)
+        _issues_ctx="${_issues_ctx}### Issue #${_n}
+${_one}
+
+"
+      fi
+    done
+
     # Attaching the issue is the job; rewriting the title and body is a bonus.
     # One budget covers BOTH generations, so `gai issue` never stalls longer than
     # the user was told to expect — on a box with no spare GPU or RAM a 1.5b
@@ -853,10 +1028,10 @@ ${_one}
     GAI_GEN_TIMEOUT=""
 
     if [[ "$_slow" == "true" ]]; then
-      echo "⚠ Model did not finish inside ${_budget}s — attaching the issue only,"
+      echo "⚠ Model did not finish inside ${_budget}s — the issue is attached,"
       echo "  title and body left as they are. Raise it with GAI_ISSUE_TIMEOUT=60."
     elif [[ -z "$_gen_title" || -z "$_gen_body" ]]; then
-      echo "⚠ Model returned nothing usable — attaching the issue only,"
+      echo "⚠ Model returned nothing usable — the issue is attached,"
       echo "  title and body left as they are."
     else
       # All or nothing: a fresh title above a stale body describes neither.
@@ -867,107 +1042,11 @@ ${_one}
         | grep -viE "^[[:space:]]*${_close_re}[[:space:]]*$" \
         | python3 -c "import sys; print(sys.stdin.read().rstrip())" || true)
       _rewrote=true
+      _gai_pr_write rewrite
     fi
   else
-    echo "⚠ Ollama not running — keeping the existing title and body."
+    echo "⚠ Ollama not running — the issue is attached, title and body left as they are."
     echo "  Start it (ollama serve) and re-run to regenerate them."
-  fi
-
-  # Everything above ran against the PR as it was when this run started — issue
-  # threads and up to 40 s of model ago — and another `gai issue` may have
-  # written since. Re-read it under the lock and apply only this run's change
-  # (add or drop one issue) to what is there now. A plain union with the old
-  # list would resurrect an issue another run's --remove just dropped.
-  if [[ "$_issue_dry_run" != "true" ]]; then
-    _gai_pr_lock
-  fi
-  _fresh_json=$(gh pr view "$_pr_num" --repo "$_issue_repo" --json title,body 2> /dev/null || true)
-  if [[ -n "$_fresh_json" ]]; then
-    _fresh_body=$(echo "$_fresh_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('body') or '')")
-    _fresh_nums=$(printf '%s\n' "$_fresh_body" | grep -ioE "$_close_re" | grep -oE '[0-9]+' || true)
-    if [[ "$_issue_remove" == "true" ]]; then
-      _merged=$(printf '%s\n' "$_fresh_nums" | grep -E '^[0-9]+$' | awk '!seen[$0]++' \
-        | grep -vFx "$_issue_num" || true)
-    else
-      _merged=$(printf '%s\n%s\n' "$_fresh_nums" "$_issue_num" | grep -E '^[0-9]+$' | awk '!seen[$0]++')
-    fi
-
-    if [[ "$_merged" != "$_all_nums" ]]; then
-      echo "→ PR #${_pr_num} changed while this ran — keeping the issues written meanwhile."
-    fi
-    _all_nums="$_merged"
-    if [[ -n "$_all_nums" ]]; then
-      _nums_pretty=$(echo "$_all_nums" | sed 's/^/#/' | tr '\n' ' ' | sed 's/ *$//')
-    else
-      _nums_pretty=""
-    fi
-
-    # Not regenerated here, so the fresh title and prose win over the copy read
-    # at the start — they may be another run's freshly generated ones.
-    if [[ "$_rewrote" != "true" ]]; then
-      _new_title=$(echo "$_fresh_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('title') or '')")
-      _new_body=$(_gai_strip_closes "$_fresh_body")
-    fi
-  fi
-
-  # Canonical closing block, rebuilt from scratch every run so re-running with a
-  # second issue keeps the first one's Closes line alongside the new one.
-  # Removing the last issue leaves nothing to close: ship a bare body rather
-  # than a dangling marker over an empty block.
-  if [[ -n "$_all_nums" ]]; then
-    _closes_block="<!-- gai:closes -->"
-    for _n in $_all_nums; do
-      _closes_block="${_closes_block}
-Closes #${_n}"
-    done
-
-    _final_body="${_new_body}
-
-${_closes_block}"
-  else
-    _final_body="$_new_body"
-  fi
-
-  if [[ "$_issue_dry_run" == "true" ]]; then
-    echo ""
-    echo "── dry run: PR #${_pr_num} would become ──"
-    echo "Title: $_new_title"
-    echo ""
-    echo "$_final_body"
-    echo "─────────────────────────────────────────"
-  else
-    if [[ -t 0 ]]; then
-      echo ""
-      echo "PR #${_pr_num} title: $_new_title"
-      if [[ -n "$_nums_pretty" ]]; then
-        echo "Closes: $_nums_pretty"
-      else
-        echo "Closes: (none)"
-      fi
-    fi
-
-    gh pr edit "$_pr_num" --repo "$_issue_repo" \
-      --title "$_new_title" \
-      --body "$_final_body"
-
-    # Released by hand, not left to the EXIT trap: the Claude session below is an
-    # `exec`, which keeps this pid and skips the trap, so the lock would look
-    # alive and stall every other run for as long as that session is open.
-    _gai_pr_unlock
-    trap - EXIT INT TERM
-
-    if [[ "$_issue_remove" == "true" ]]; then
-      _left="${_nums_pretty:-none}"
-      if [[ "$_rewrote" == "true" ]]; then
-        echo "✓ Updated PR #${_pr_num} — removed #${_issue_num}, rewrote title and body, still closes: $_left"
-      else
-        echo "✓ Updated PR #${_pr_num} — removed #${_issue_num}, still closes: $_left (title and body unchanged)"
-      fi
-    elif [[ "$_rewrote" == "true" ]]; then
-      echo "✓ Updated PR #${_pr_num} — title, body, and Closes for $_nums_pretty"
-    else
-      echo "✓ Updated PR #${_pr_num} — Closes for $_nums_pretty (title and body unchanged)"
-    fi
   fi
 
   _gai_issue_claude_session
