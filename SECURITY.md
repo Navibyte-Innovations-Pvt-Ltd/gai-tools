@@ -2,7 +2,7 @@
 
 ## Scope
 
-gai-tools runs shell scripts locally and calls Ollama at `localhost:11434`. It never makes outbound network requests beyond your machine.
+gai-tools runs shell scripts locally. Commit messages come from Ollama at `localhost:11434`; `gai pr` and `gai issue` talk to GitHub through `gh`, and `gai issue` can hand off to a `claude` session you choose to start.
 
 ## Supported versions
 
@@ -35,5 +35,11 @@ Response within 48 hours. If confirmed, a patch will be released and you'll be c
   repo-root `.gairc` — see [docs/usage.md](docs/usage.md#what-gai-skips)
 - `.gairc` is read line by line and never `source`d, so a repo cannot execute
   code through it
-- PID files written to `/tmp/` — no persistent state beyond the running watcher
-- No telemetry, no analytics, no network calls except `localhost:11434`
+- PID files go to `/tmp/`; logs (kept 24 h) and pasted images (kept 7 days) live
+  under `~/.gai/`
+- `gai issue` reads the clipboard only when you press Ctrl+V at its
+  extra-instructions prompt. The image is saved under `~/.gai/images/` and
+  reaches Claude only through the session you start; that session is granted
+  that run's folder alone
+- No telemetry or analytics. Diffs go only to `localhost:11434`; the only other
+  traffic is `gh` (GitHub) and the `claude` session you choose to start
