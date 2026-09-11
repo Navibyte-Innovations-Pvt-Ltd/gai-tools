@@ -59,7 +59,7 @@ The installer handles everything: Homebrew check, `fswatch`, `ollama`, model dow
 | `gai --force` | Commit even if a file trips the secret check |
 | `gai update` | Update to latest release from GitHub |
 | `gai pr` | Open a PR from the current branch — asks its questions up front (branch name on `main`/`master`, empty commit when nothing is ahead), then runs unattended |
-| `gai issue <n\|url>` | Ask everything up front (create a PR? rewrite title and body? start Claude?), then run it all: attach the issue to an open PR (opening one if none exist), rewrite that PR's title and body from the issue thread, keep every previous `Closes #N` and add the new one, and launch a Claude session seeded with the full thread |
+| `gai issue <n\|url>` | Ask everything up front (create a PR? rewrite title and body? start Claude?), then run it all: attach the issue to an open PR (opening one if none exist), rewrite that PR's title and body from the issue thread, keep every previous `Closes #N` and add the new one, and launch a Claude session seeded with the full thread, plus any screenshots you paste with Ctrl+V |
 | `gai issue <n\|url> --remove` | Undo of the above — drop that issue's `Closes #N` from the PR, keep the rest, and rewrite the title and body from the issues that are left |
 | `gai-watch` | Start watcher manually |
 | `gai-watch --dry-run` | Watch + preview only |

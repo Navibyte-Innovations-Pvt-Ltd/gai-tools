@@ -9,6 +9,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) — [Semantic V
 ## [Unreleased]
 ### Added
 
+- feat(gai): `gai issue` can hand Claude screenshots. Ctrl+V at the
+  `Extra instructions for Claude` prompt pastes the copied image and types
+  `[Image #N]` into the line, as in Claude Code; deleting the marker before Enter
+  drops the image. Dragging an image file onto the prompt works too. Images are
+  copied to a per-run folder under `~/.gai/images/`, listed in the prompt as
+  `[Image #N] <path>`, and only that folder is passed to `claude --add-dir`.
+  Folders older than 7 days are deleted when the next session starts
+
 - feat(gai): `gai issue <n|url> --remove` (`-r`) detaches an issue attached by
   mistake — it drops that issue's line from the `<!-- gai:closes -->` block, keeps
   every other linked issue, and regenerates the PR title and body from the issues

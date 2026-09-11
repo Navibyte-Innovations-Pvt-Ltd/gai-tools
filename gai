@@ -202,6 +202,123 @@ $_issues"
   _gai_ollama_gen "$_prompt"
 }
 
+# ── images for the Claude session ─────────────────────────────────────────────
+# Ctrl+V at the extra-instructions prompt pastes the copied image, as it does in
+# Claude Code: readline hands the key to a shell function that saves the
+# clipboard and types `[Image #N]` into the line. Cmd+V still pastes nothing —
+# the terminal only ever sends text. A file dragged onto the prompt lands as its
+# path and is attached too.
+# Each is copied under a name gai picks, so the prompt never carries a path with
+# spaces or U+202F (macOS screenshot names), or one that vanishes (the temp file
+# behind a dragged screenshot thumbnail).
+
+_img_dir="$HOME/.gai/images"
+_img_run=""     # this run's folder under _img_dir — the only one Claude is granted
+_img_count=0
+_img_saved=""   # "[Image #N] <path>" per line, as attached
+_img_list=""    # the same, minus images whose marker was deleted from the text
+
+# Called inside $( ), so it can only read state — _img_run is set by the caller.
+_gai_img_dest() {
+  echo "${_img_run}/$((_img_count + 1)).$1"
+}
+
+_gai_img_keep() {
+  _img_count=$((_img_count + 1))
+  _img_saved="${_img_saved}[Image #${_img_count}] $1
+"
+}
+
+# A line counts as a dropped image only when the whole line is one image path.
+# Terminals escape spaces in a dropped path with backslashes; some quote it.
+_gai_img_from_path() {
+  local _p="${1//\\/}"
+  _p="${_p#"${_p%%[![:space:]]*}"}"
+  _p="${_p%"${_p##*[![:space:]]}"}"
+  _p="${_p#\'}"
+  _p="${_p%\'}"
+  _p="${_p/#\~/$HOME}"
+
+  local _ext
+  _ext=$(echo "${_p##*.}" | tr '[:upper:]' '[:lower:]')
+  case "$_ext" in
+    png|jpg|jpeg|gif|webp) ;;
+    *) return 1 ;;
+  esac
+  if [[ ! -f "$_p" ]]; then
+    return 1
+  fi
+
+  mkdir -p "$_img_run"
+  local _dest
+  _dest=$(_gai_img_dest "$_ext")
+  cp "$_p" "$_dest" || return 1
+  _gai_img_keep "$_dest"
+}
+
+_gai_clip_has_image() {
+  command -v osascript > /dev/null 2>&1 || return 1
+  local _info
+  _info=$(osascript -e 'clipboard info' 2>/dev/null || true)
+  case "$_info" in
+    *furl*) return 1 ;;  # a file copied in Finder — the picture would be its icon
+    *PNGf*|*"TIFF picture"*) return 0 ;;
+  esac
+  return 1
+}
+
+_gai_clip_save() {
+  mkdir -p "$_img_run"
+  local _dest
+  _dest=$(_gai_img_dest png)
+  # AppleScript coerces a TIFF-only clipboard (browser "Copy Image") to PNG too.
+  osascript -e "set f to open for access POSIX file \"${_dest}\" with write permission" \
+    -e 'write (the clipboard as «class PNGf») to f' \
+    -e 'close access f' > /dev/null 2>&1 || true
+
+  if [[ ! -s "$_dest" ]]; then
+    rm -f "$_dest"
+    return 1
+  fi
+  _gai_img_keep "$_dest"
+}
+
+# Bound to Ctrl+V. bash 3.2 cannot edit the line from a `bind -x` function
+# (READLINE_LINE is bash 4+), so Ctrl+V is a macro of two keys: this function,
+# then C-x C-j, which it rebinds to type the marker of the image it just saved.
+# It runs in the main shell under `set -e`, so nothing here may fail bare.
+_gai_rl_paste() {
+  # bash 3.2 redraws the prompt on a fresh row after a `bind -x` call; step back
+  # up so the half-typed line is not left behind. A line already wrapped past
+  # the terminal width still leaves its upper rows.
+  printf '\033[1A\r\033[2K'
+  if _gai_clip_has_image && _gai_clip_save; then
+    bind "\"\\C-x\\C-j\": \"[Image #${_img_count}] \"" 2>/dev/null || true
+  else
+    bind '"\C-x\C-j": ""' 2>/dev/null || true
+    echo "  (no image on the clipboard — copy one, then Ctrl+V)"
+  fi
+  return 0
+}
+
+# Deleting `[Image #N]` from the line before Enter drops that image, as removing
+# the placeholder does in Claude Code.
+_gai_img_filter() {
+  local _line _tag
+  _img_list=""
+  while IFS= read -r _line; do
+    if [[ -z "$_line" ]]; then
+      continue
+    fi
+    _tag="${_line%%] *}]"
+    case "$_extra" in
+      *"$_tag"*) _img_list="${_img_list}${_line}
+" ;;
+      *) rm -f "${_line#*] }" ;;
+    esac
+  done <<< "$_img_saved"
+}
+
 # ── issue subcommand ──────────────────────────────────────────────────────────
 
 # Compose the full issue thread (title, labels, body, comments) into a prompt and
@@ -258,6 +375,14 @@ ${_issue_ctx}"
 ${_extra}"
   fi
 
+  if [[ -n "$_img_list" ]]; then
+    _prompt="${_prompt}
+
+## Images from the user
+Open each one with the Read tool before starting — they are part of the instructions.
+${_img_list}"
+  fi
+
   if [[ "$_issue_dry_run" == "true" ]]; then
     echo ""
     echo "── dry run: prompt that would be sent to claude ──"
@@ -267,6 +392,10 @@ ${_extra}"
   fi
 
   echo "→ Launching Claude session…"
+  # --add-dir is variadic: placed before the prompt it swallows it as a directory.
+  if [[ -n "$_img_list" ]]; then
+    exec claude "$_prompt" --add-dir "$_img_run"
+  fi
   exec claude "$_prompt"
 }
 
@@ -460,7 +589,43 @@ if [[ "${1:-}" == "issue" ]]; then
       [Nn]*) _ans_claude=no ;;
       *)
         _ans_claude=yes
-        read -rp "Extra instructions for Claude (optional): " _extra || true
+
+        # Ctrl+V pastes the copied image (see _gai_rl_paste). `bind` needs emacs
+        # mode, which a script starts without; a bash with no readline just gets
+        # a plain prompt that still takes dragged files.
+        _rl=false
+        if set -o emacs 2> /dev/null \
+          && bind -x '"\C-x\C-i": _gai_rl_paste' 2> /dev/null \
+          && bind '"\C-v": "\C-x\C-i\C-x\C-j"' 2> /dev/null; then
+          _rl=true
+        fi
+
+        # Logs are pruned after 24 h; images get 7 days, because a Claude session
+        # is often resumed the next day and still needs to open them.
+        if [[ -d "$_img_dir" ]]; then
+          find "$_img_dir" -mindepth 1 -maxdepth 1 -mtime +7 -exec rm -rf {} + 2> /dev/null || true
+        fi
+        _img_run="${_img_dir}/${_issue_repo//\//-}-${_issue_num}-$(date +%s)"
+
+        # A dropped image path re-asks, so several can go in before the text.
+        _img_prefix=""
+        while :; do
+          read -e -r -p "Extra instructions for Claude (optional — Ctrl+V pastes an image): " _extra || true
+          if ! _gai_img_from_path "$_extra"; then
+            break
+          fi
+          _img_prefix="${_img_prefix}[Image #${_img_count}] "
+          echo "  ✓ attached [Image #${_img_count}]"
+          _extra=""
+        done
+
+        if [[ "$_rl" == "true" ]]; then
+          bind '"\C-v": quoted-insert' 2> /dev/null || true
+          set +o emacs
+        fi
+
+        _extra="${_img_prefix}${_extra}"
+        _gai_img_filter
         ;;
     esac
   fi

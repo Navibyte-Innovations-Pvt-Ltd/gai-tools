@@ -48,4 +48,5 @@ gai-watch --dry-run     # watch + preview only
 - **Model override**: `export GAI_MODEL=qwen2.5-coder:7b` before running
 - **`gai issue` slow / hangs on generation**: 40 s budget for title + body combined, then it attaches the issue only — raise with `GAI_ISSUE_TIMEOUT=60`; see `docs/usage.md#working-an-issue`
 - **`gai pr` / `gai issue` ask nothing after the first block**: every question is collected up front, then the run is unattended. `gai pr` takes `--branch=`, `--allow-empty`, `--yes`, `--no-generate`; see `docs/usage.md#opening-a-pr`
+- **Image paste at `Extra instructions for Claude`**: Ctrl+V (not Cmd+V) — a readline `bind -x` saves the clipboard and types `[Image #N]`; bash 3.2 quirks noted in `_gai_rl_paste`; see `docs/usage.md#working-an-issue`
 - **Secret skip false positive**: basename + added-line gates only; override with `gai --force`, `GAI_ALLOW_PATHS`, or `allow=<glob>` in `<repo>/.gairc` — see `docs/usage.md#what-gai-skips`

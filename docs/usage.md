@@ -91,7 +91,7 @@ block, before the first slow step, then runs to the end without stopping:
 Create a PR for #354? [Y/n]
 Rewrite the PR title and body from the issue thread? [Y/n]
 Start a Claude session on #354 when this is done? [Y/n]
-Extra instructions for Claude (optional):
+Extra instructions for Claude (optional — Ctrl+V pastes an image):
 ```
 
 Only the questions your situation actually raises are asked — an issue going onto
@@ -183,6 +183,28 @@ Then it executes, in order:
    instructions line you already typed, and `exec`s `claude` in the current
    directory — so the session starts in your repo, already holding the whole
    thread. No pasting the URL and waiting for Claude to fetch it.
+
+   **Pasting images.** At the extra-instructions prompt, **Ctrl+V** pastes the
+   copied image, as in Claude Code: `gai` saves it and types `[Image #1]` into
+   the line, so you can write `the padding in [Image #1] is off`. Paste as many
+   as you like. Delete a marker before pressing Enter and that image is dropped.
+   With no image on the clipboard, Ctrl+V prints a one-line notice and changes
+   nothing. The binding needs readline's emacs mode, which macOS's bash has; on
+   a bash without it Ctrl+V is left unbound and the prompt still takes typed
+   text and dropped files.
+
+   **Cmd+V** still pastes nothing: the terminal only ever sends text, so there
+   is no image for `gai` to receive. You can also **drag an image file** onto the
+   prompt. The terminal types its path, `gai` attaches it and asks again. Only a
+   line that is one image path, and nothing else, counts as a drop.
+
+   Each image is copied into a folder for this run,
+   `~/.gai/images/<repo>-<issue>-<time>/`, under a name with no spaces. It is
+   listed in the prompt as `[Image #1] <path>` with an instruction to read it,
+   and only that run's folder is passed to `claude --add-dir`, so Claude can
+   open them without prompting but never sees images pasted for other issues.
+   `--dry-run` prints those lines too. Folders older than 7 days are deleted the
+   next time you start a session — long enough to resume one the next day.
 
 The question is asked on **every** run, including when the issue is already
 attached, so re-running the command is how you start work on an issue you linked
