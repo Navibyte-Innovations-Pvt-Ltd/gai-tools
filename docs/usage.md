@@ -139,6 +139,14 @@ Then it executes, in order:
    Before this, overlapping runs each wrote back the body they had read up to a
    minute earlier, so the later one silently dropped the other's `Closes` line.
 
+   **gai checks the link, not just the edit.** GitHub ignores `Closes` lines
+   inside a code block or HTML comment, so a description that leaves one open —
+   a model reply wrapped in ```` ```markdown ````, say — links nothing. gai
+   unwraps and closes those before appending the block, then asks GitHub
+   whether the issue is really linked: `✓ GitHub links #N to PR #M`, or a `⚠`
+   saying why it may not be (a code block, or a PR not aimed at the default
+   branch).
+
    **Attached the wrong issue?** `gai issue 34 --remove` (or `-r`) is the undo.
    It drops `#34` from the closing block, keeps every other issue, and rewrites
    the title and body from the issues that *remain* — the mistaken attach is
