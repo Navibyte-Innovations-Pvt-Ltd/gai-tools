@@ -46,7 +46,7 @@ gai-watch --dry-run     # watch + preview only
 - **Lock/race**: `gai` uses a lockfile at `/tmp/gai-<repo-hash>.lock` — don't bypass it
 - **Ollama not running**: `ollama serve` then `ollama pull qwen2.5-coder:1.5b`
 - **Model override**: `export GAI_MODEL=qwen2.5-coder:7b` before running
-- **`gai issue` slow / hangs on generation**: 40 s budget for title + body combined, then it attaches the issue only — raise with `GAI_ISSUE_TIMEOUT=60`; see `docs/usage.md#working-an-issue`
+- **`gai issue` slow / hangs on generation**: the issue is attached first (seconds, `_gai_pr_write attach`); only the title/body rewrite waits — 40 s budget combined, raise with `GAI_ISSUE_TIMEOUT=60`; see `docs/usage.md#working-an-issue`
 - **`gai pr` / `gai issue` ask nothing after the first block**: every question is collected up front, then the run is unattended. `gai pr` takes `--branch=`, `--allow-empty`, `--yes`, `--no-generate`; see `docs/usage.md#opening-a-pr`
 - **`gai issue` ✓ but the issue shows no linked PR**: GitHub ignores `Closes` inside code/comments — `_gai_md_sanitize` closes open fences, `_gai_verify_linked` checks `closingIssuesReferences`; see `docs/usage.md#working-an-issue`
 - **`gai issue` "waiting for it…"**: another run holds `/tmp/gai-pr-<hash>.lock` for that PR; dead owners are reclaimed, 30 s cap. Re-read-before-write keeps parallel runs from dropping `Closes` lines — see `docs/usage.md#working-an-issue`
