@@ -114,9 +114,12 @@ Then it executes, in order:
    repo stops with an error telling you where to `cd`, and it stops *before*
    asking anything. If `gai pr` fails for another reason (nothing to push) the
    command aborts — fix the blocker and re-run.
-2. **Attach and rewrite.** `gai` rebuilds the PR from the issue thread: it pulls
-   the issue's title and body, regenerates the PR **title** and **body** through
-   Ollama, and rewrites the closing block. Everything the PR already closed stays —
+2. **Attach, then rewrite.** `gai` writes the closing block first — a second or
+   two after the questions, before anything slow — so the issue shows its linked
+   PR straight away (`✓ Attached #31 to PR #12`). Only then, if you said yes to
+   the rewrite, does it pull each linked issue's title and body, regenerate the
+   PR **title** and **body** through Ollama, and save a second time
+   (`✓ Rewrote PR #12 title and body`). Everything the PR already closed stays —
    `Fixes #9`, `resolved #7` and `Closes #12` are all collected, deduped and
    re-emitted as one canonical block with the new issue appended:
 
@@ -164,14 +167,14 @@ Then it executes, in order:
    still produces a body that describes that PR.
 
    Rewriting never happens unattended: answer `n` to the rewrite question, or run
-   with Ollama stopped or with no TTY, and it updates only the closing block,
-   leaving the title and body untouched.
+   with Ollama stopped or with no TTY, and the attach is all that happens — the
+   title and body stay untouched, and the issue threads are not even fetched.
 
    The whole rewrite gets a **40-second budget** — title and body together, not
    each. On a machine with no spare GPU or RAM a 1.5b model can grind for
-   minutes, and attaching the issue matters more than a fresh title, so a run
-   that blows the budget prints `⚠ Model did not finish inside 40s` and writes
-   only the closing block. It is all-or-nothing: a fresh title above a stale
+   minutes, and the issue is already attached by then, so a run that blows the
+   budget prints `⚠ Model did not finish inside 40s — the issue is attached` and
+   leaves the title and body alone. It is all-or-nothing: a fresh title above a stale
    body describes neither, so a body that misses the deadline discards the title
    too. The title is generated first because it is the cheaper prompt; if it
    times out, the body is skipped outright. Raise or lower it with
