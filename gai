@@ -378,6 +378,48 @@ _gai_strip_closes() {
     | python3 -c "import sys; print(sys.stdin.read().rstrip())" || true
 }
 
+# Blocks another tool owns in a PR body, carried from $1 (the PR as it stands)
+# onto $2 (freshly generated prose): the single `<!-- pr-shot: {...} -->` line a
+# fix agent writes, and everything from `<!-- pr-shots:start -->` to
+# `<!-- pr-shots:end -->`, which a screenshot job rewrites on every push. The
+# model only ever sees commits and issues, so a rewrite used to delete both —
+# practise_stack PR #1897 lost its screenshot instruction and the job's note
+# saying why there was no picture. Copies the model echoed are dropped first.
+_gai_keep_owned_blocks() {
+  python3 - "$1" "$2" << 'PY' || printf '%s\n' "$2"
+import re, sys
+
+shot_line = re.compile(r"^\s*<!-- pr-shot: \{.*\} -->\s*$")
+start, end = "<!-- pr-shots:start -->", "<!-- pr-shots:end -->"
+
+def split(text):
+    """(prose lines, pr-shot lines, pr-shots block lines, block closed?)"""
+    prose, shots, block, inside, closed = [], [], [], False, False
+    for line in text.split("\n"):
+        s = line.strip()
+        if s == start and not block:
+            inside = True
+        if inside:
+            block.append(line)
+            if s == end:
+                inside, closed = False, True
+            continue
+        (shots if shot_line.match(line) else prose).append(line)
+    return prose, shots, block, closed
+
+_, shots, block, closed = split(sys.argv[1].rstrip("\n"))
+prose, _, _, _ = split(sys.argv[2].rstrip("\n"))
+# A dropped echo leaves its surrounding blank lines behind; keep one.
+prose = [l for i, l in enumerate(prose) if l.strip() or i == 0 or prose[i - 1].strip()]
+while prose and not prose[-1].strip():
+    prose.pop()
+
+# An unterminated block would swallow the Closes lines appended after it.
+tail = shots[:1] + (([""] if shots else []) + block if block and closed else [])
+print("\n".join(prose + ([""] + tail if tail else [])))
+PY
+}
+
 # A PR body is untrusted markdown — model output, or whatever a human left there.
 # One that leaves a code fence or an HTML comment open swallows everything after
 # it, the Closes block included, and GitHub ignores closing keywords inside code:
@@ -423,19 +465,22 @@ PY
 # Pass "quiet" to print only the warning — used after the rewrite, when the
 # attach has already reported the link once.
 _gai_verify_linked() {
-  local _quiet="${1:-}" _try _linked
+  local _quiet="${1:-}" _try _linked _missing=""
   for _try in 1 2 3 4 5; do
     _linked=$(gh pr view "$_pr_num" --repo "$_issue_repo" --json closingIssuesReferences \
       --jq '.closingIssuesReferences[].number' 2> /dev/null || true)
-    if printf '%s\n' "$_linked" | grep -qx "$_issue_num"; then
+    # Every issue this run attached, not just one: a pair can link one at a time.
+    _missing=$(printf '%s\n' "$_issue_nums" | grep -vFx "${_linked:-_}" || true)
+    if [[ -z "$_missing" ]]; then
       if [[ -z "$_quiet" ]]; then
-        echo "✓ GitHub links #${_issue_num} to PR #${_pr_num}"
+        echo "✓ GitHub links ${_issue_label} to PR #${_pr_num}"
       fi
       return 0
     fi
     sleep 1
   done
-  echo "⚠ GitHub is not linking #${_issue_num} to PR #${_pr_num}, though its Closes line is in the body."
+  _missing=$(echo "$_missing" | sed 's/^/#/' | tr '\n' ' ' | sed 's/ *$//')
+  echo "⚠ GitHub is not linking ${_missing} to PR #${_pr_num}, though the Closes line is in the body."
   echo "  It links only when the PR targets the default branch and the line is not inside"
   echo "  a code block or HTML comment. Open the PR and check how the description renders."
   return 0
@@ -460,9 +505,9 @@ _gai_pr_write() {
     _fresh_nums=$(printf '%s\n' "$_fresh_body" | grep -ioE "$_close_re" | grep -oE '[0-9]+' || true)
     if [[ "$_issue_remove" == "true" ]]; then
       _merged=$(printf '%s\n' "$_fresh_nums" | grep -E '^[0-9]+$' | awk '!seen[$0]++' \
-        | grep -vFx "$_issue_num" || true)
+        | grep -vFx "$_issue_nums" || true)
     else
-      _merged=$(printf '%s\n%s\n' "$_fresh_nums" "$_issue_num" | grep -E '^[0-9]+$' | awk '!seen[$0]++')
+      _merged=$(printf '%s\n%s\n' "$_fresh_nums" "$_issue_nums" | grep -E '^[0-9]+$' | awk '!seen[$0]++')
     fi
 
     if [[ "$_merged" != "$_all_nums" ]]; then
@@ -480,6 +525,8 @@ _gai_pr_write() {
     if [[ "$_rewrote" != "true" ]]; then
       _new_title=$(echo "$_fresh_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('title') or '')")
       _new_body=$(_gai_strip_closes "$_fresh_body")
+    else
+      _new_body=$(_gai_keep_owned_blocks "$(_gai_strip_closes "$_fresh_body")" "$_new_body")
     fi
   fi
 
@@ -528,9 +575,9 @@ ${_closes_block}"
 
   if [[ "$_phase" == "attach" ]]; then
     if [[ "$_issue_remove" == "true" ]]; then
-      echo "✓ Removed #${_issue_num} from PR #${_pr_num} — still closes: ${_nums_pretty:-none}"
+      echo "✓ Removed ${_issue_label} from PR #${_pr_num} — still closes: ${_nums_pretty:-none}"
     else
-      echo "✓ Attached #${_issue_num} to PR #${_pr_num} — closes: $_nums_pretty"
+      echo "✓ Attached ${_issue_label} to PR #${_pr_num} — closes: $_nums_pretty"
       _gai_verify_linked
     fi
   else
@@ -543,8 +590,8 @@ ${_closes_block}"
 
 # ── issue subcommand ──────────────────────────────────────────────────────────
 
-# Compose the full issue thread (title, labels, body, comments) into a prompt and
-# hand it to an interactive Claude session, so the user never re-types the URL.
+# Compose every issue thread (title, labels, body, comments) into one prompt and
+# hand it to one interactive Claude session, so the user never re-types a URL.
 _gai_issue_claude_session() {
   # Detaching an issue is the opposite of starting work on it — never offer.
   if [[ "$_issue_remove" == "true" ]]; then
@@ -557,38 +604,67 @@ _gai_issue_claude_session() {
 
   if [[ ! -t 0 ]]; then
     echo "Not a TTY — skipping Claude session offer."
-    echo "  Run manually: claude \"$_issue_url\""
+    echo "  Run manually: claude \"$(echo "$_issue_urls" | tr '\n' ' ' | sed 's/ *$//')\""
     return 0
   fi
 
   # Answered in the question phase, before any of the slow work ran.
   if [[ "${_ans_claude:-no}" != "yes" ]]; then
-    echo "Skipped Claude session. Re-run any time: gai issue $_issue_url"
+    echo "Skipped Claude session. Re-run any time: gai issue $_issue_args"
     return 0
   fi
 
   echo ""
-  echo "→ Fetching issue #${_issue_num} context…"
-  _issue_ctx=$(gh issue view "$_issue_num" --repo "$_issue_repo" \
-    --json title,body,labels,comments \
-    --jq '
-      "Title: \(.title)",
-      "Labels: \([(.labels // [])[].name] | join(", ") | if . == "" then "none" else . end)",
-      "",
-      "## Description",
-      ((.body // "") | if . == "" then "(no description)" else . end),
-      ((.comments // []) | if length == 0 then empty else ("", "## Comments", (.[] | "--- @\(.author.login // "unknown") ---\n\(.body // "")")) end)
-    ' || true)
+  echo "→ Fetching ${_issue_label} context…"
+  local _n _one _issue_ctx=""
+  for _n in $_issue_nums; do
+    _one=$(gh issue view "$_n" --repo "$_issue_repo" \
+      --json title,body,labels,comments \
+      --jq '
+        "Title: \(.title)",
+        "Labels: \([(.labels // [])[].name] | join(", ") | if . == "" then "none" else . end)",
+        "",
+        "## Description",
+        ((.body // "") | if . == "" then "(no description)" else . end),
+        ((.comments // []) | if length == 0 then empty else ("", "## Comments", (.[] | "--- @\(.author.login // "unknown") ---\n\(.body // "")")) end)
+      ' || true)
 
-  if [[ -z "$_issue_ctx" ]]; then
-    echo "error: could not fetch issue #${_issue_num} from ${_issue_repo}." >&2
-    return 1
-  fi
+    if [[ -z "$_one" ]]; then
+      echo "error: could not fetch issue #${_n} from ${_issue_repo}." >&2
+      return 1
+    fi
 
-  _prompt="Work on GitHub issue #${_issue_num} in ${_issue_repo}.
-${_issue_url}
+    if [[ "$_issue_count" -gt 1 ]]; then
+      _issue_ctx="${_issue_ctx}# Issue #${_n}
+https://github.com/${_issue_repo}/issues/${_n}
+
+${_one}
+
+"
+    else
+      _issue_ctx="$_one"
+    fi
+  done
+
+  if [[ "$_issue_count" -gt 1 ]]; then
+    # Passed together because they are one piece of work — often the same bug
+    # filed twice. One session with every thread beats one session per issue
+    # that each rediscovers the same code.
+    _prompt="Work on GitHub issues ${_issue_label} in ${_issue_repo} as ONE piece of work.
+${_issue_urls}
+
+They were filed separately but were handed over together, so they likely describe
+the same problem or overlapping parts of it. Read every thread first, work out
+what they share, and build one fix that resolves all of them. If they turn out
+to be genuinely different problems, say so before writing code.
 
 ${_issue_ctx}"
+  else
+    _prompt="Work on GitHub issue #${_issue_nums} in ${_issue_repo}.
+${_issue_urls}
+
+${_issue_ctx}"
+  fi
 
   if [[ -n "$_extra" ]]; then
     _prompt="${_prompt}
@@ -622,7 +698,7 @@ ${_img_list}"
 }
 
 if [[ "${1:-}" == "issue" ]]; then
-  _issue_arg=""
+  _issue_args=""
   _issue_dry_run=false
   _issue_remove=false
 
@@ -635,16 +711,12 @@ if [[ "${1:-}" == "issue" ]]; then
         echo "error: unknown flag for 'gai issue': $_arg" >&2
         exit 1
         ;;
-      *)
-        if [[ -z "$_issue_arg" ]]; then
-          _issue_arg="$_arg"
-        fi
-        ;;
+      *) _issue_args="${_issue_args:+$_issue_args }$_arg" ;;
     esac
   done
 
-  if [[ -z "$_issue_arg" ]]; then
-    echo "Usage: gai issue <issue-number|github-issue-url> [--remove] [--dry-run]" >&2
+  if [[ -z "$_issue_args" ]]; then
+    echo "Usage: gai issue <issue-number|github-issue-url>[,<more>…] [--remove] [--dry-run]" >&2
     exit 1
   fi
 
@@ -659,32 +731,63 @@ if [[ "${1:-}" == "issue" ]]; then
     exit 1
   fi
 
-  # A bare number (or "#123") means "the issue in the repo I'm standing in".
-  if [[ "$_issue_arg" =~ ^#?[0-9]+$ ]]; then
-    _issue_num="${_issue_arg#\#}"
-    _issue_repo=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || true)
+  # Several issues — comma- or space-separated — go onto one PR in one write and
+  # into one Claude session: usually the same bug filed twice. Every ref must
+  # live in the same repo, since the PR it lands on can only close issues there.
+  _issue_repo=""
+  _issue_nums=""
+  _cwd_issue_repo=""
+  for _ref in ${_issue_args//,/ }; do
+    # A bare number (or "#123") means "the issue in the repo I'm standing in".
+    if [[ "$_ref" =~ ^#?[0-9]+$ ]]; then
+      _num="${_ref#\#}"
+      if [[ -z "$_cwd_issue_repo" ]]; then
+        _cwd_issue_repo=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || true)
+      fi
+      _repo="$_cwd_issue_repo"
+
+      if [[ -z "$_repo" ]]; then
+        echo "error: 'gai issue $_ref' needs a GitHub repo in the current directory." >&2
+        echo "  cd into the repo, or pass the full issue URL." >&2
+        exit 1
+      fi
+    else
+      # || true: set -e would otherwise abort on a non-matching grep before the
+      # friendly error below ever prints.
+      _num=$(echo "$_ref" | grep -oE '/issues/[0-9]+' | grep -oE '[0-9]+' | head -1 || true)
+      _repo=$(echo "$_ref" | grep -oE 'github\.com/[^/]+/[^/]+' | sed 's|github\.com/||' | head -1 || true)
+
+      if [[ -z "$_num" || -z "$_repo" ]]; then
+        echo "error: invalid GitHub issue reference: $_ref" >&2
+        echo "  Expected: 123  or  https://github.com/owner/repo/issues/123" >&2
+        exit 1
+      fi
+    fi
 
     if [[ -z "$_issue_repo" ]]; then
-      echo "error: 'gai issue $_issue_arg' needs a GitHub repo in the current directory." >&2
-      echo "  cd into the repo, or pass the full issue URL." >&2
+      _issue_repo="$_repo"
+    elif [[ "$_repo" != "$_issue_repo" ]]; then
+      echo "error: #${_num} lives in ${_repo}, but the other issues are in ${_issue_repo}." >&2
+      echo "  One PR can only close issues in its own repo — run gai issue once per repo." >&2
       exit 1
     fi
 
-    _issue_url="https://github.com/${_issue_repo}/issues/${_issue_num}"
-    echo "→ Resolved #${_issue_num} → ${_issue_repo}"
-  else
-    _issue_url="$_issue_arg"
-    # || true: set -e would otherwise abort on a non-matching grep before the
-    # friendly error below ever prints.
-    _issue_num=$(echo "$_issue_url" | grep -oE '/issues/[0-9]+' | grep -oE '[0-9]+' || true)
-    _issue_repo=$(echo "$_issue_url" | grep -oE 'github\.com/[^/]+/[^/]+' | sed 's|github\.com/||' || true)
-
-    if [[ -z "$_issue_num" || -z "$_issue_repo" ]]; then
-      echo "error: invalid GitHub issue reference: $_issue_arg" >&2
-      echo "  Expected: 123  or  https://github.com/owner/repo/issues/123" >&2
-      exit 1
+    if ! printf '%s\n' "$_issue_nums" | grep -qx "$_num"; then
+      _issue_nums="${_issue_nums:+$_issue_nums
+}$_num"
+      if [[ "$_ref" =~ ^#?[0-9]+$ ]]; then
+        echo "→ Resolved #${_num} → ${_repo}"
+      fi
     fi
-  fi
+  done
+
+  # Derived views of the list; the flow below only ever reads these.
+  _gai_issue_views() {
+    _issue_count=$(printf '%s\n' "$_issue_nums" | grep -c . || true)
+    _issue_label=$(echo "$_issue_nums" | sed 's/^/#/' | tr '\n' ' ' | sed 's/ *$//')
+    _issue_urls=$(printf '%s\n' "$_issue_nums" | sed "s|^|https://github.com/${_issue_repo}/issues/|")
+  }
+  _gai_issue_views
 
   echo "→ Fetching open PRs for ${_issue_repo}…"
 
@@ -720,7 +823,7 @@ if [[ "${1:-}" == "issue" ]]; then
     # Nothing to detach from, and opening a PR to remove an issue from it is
     # nonsense — bail before the creation prompt.
     if [[ "$_issue_remove" == "true" ]]; then
-      echo "error: --remove needs an open PR to remove #${_issue_num} from." >&2
+      echo "error: --remove needs an open PR to remove ${_issue_label} from." >&2
       exit 1
     fi
 
@@ -735,7 +838,7 @@ if [[ "${1:-}" == "issue" ]]; then
       fi
 
       if [[ "$_cwd_repo" != "$_issue_repo" ]]; then
-        echo "error: you are in ${_cwd_repo}, but issue #${_issue_num} lives in ${_issue_repo}." >&2
+        echo "error: you are in ${_cwd_repo}, but ${_issue_label} lives in ${_issue_repo}." >&2
         echo "  cd into ${_issue_repo} and re-run." >&2
         exit 1
       fi
@@ -766,7 +869,7 @@ if [[ "${1:-}" == "issue" ]]; then
   # rest — never after a generation has already run.
   if [[ "$_need_new_pr" == "true" ]]; then
     if [[ "$_tty" == "true" ]]; then
-      read -rp "Create a PR for #${_issue_num}? [Y/n] " _mk_pr || true
+      read -rp "Create a PR for ${_issue_label}? [Y/n] " _mk_pr || true
       case "$_mk_pr" in
         [Nn]*) _ans_create_pr=no ;;
         *)     _ans_create_pr=yes ;;
@@ -806,7 +909,7 @@ if [[ "${1:-}" == "issue" ]]; then
 
   # Detaching an issue is the opposite of starting work on it — never offer.
   if [[ "$_tty" == "true" && "$_issue_remove" != "true" ]] && command -v claude > /dev/null 2>&1; then
-    read -rp "Start a Claude session on #${_issue_num} when this is done? [Y/n] " _cs || true
+    read -rp "Start one Claude session on ${_issue_label} when this is done? [Y/n] " _cs || true
     case "$_cs" in
       [Nn]*) _ans_claude=no ;;
       *)
@@ -827,7 +930,7 @@ if [[ "${1:-}" == "issue" ]]; then
         if [[ -d "$_img_dir" ]]; then
           find "$_img_dir" -mindepth 1 -maxdepth 1 -mtime +7 -exec rm -rf {} + 2> /dev/null || true
         fi
-        _img_run="${_img_dir}/${_issue_repo//\//-}-${_issue_num}-$(date +%s)"
+        _img_run="${_img_dir}/${_issue_repo//\//-}-$(echo "$_issue_nums" | tr '\n' '-')$(date +%s)"
 
         # A dropped image path re-asks, so several can go in before the text.
         _img_prefix=""
@@ -856,14 +959,14 @@ if [[ "${1:-}" == "issue" ]]; then
 
   if [[ "$_need_new_pr" == "true" ]]; then
     if [[ "$_ans_create_pr" != "yes" ]]; then
-      echo "Skipped PR creation — issue #${_issue_num} not attached."
+      echo "Skipped PR creation — ${_issue_label} not attached."
       _gai_issue_claude_session
       exit 0
     fi
 
     # --dry-run must never push a branch or open a PR.
     if [[ "$_issue_dry_run" == "true" ]]; then
-      echo "dry run: would create a PR via 'gai pr', then attach #${_issue_num} to it."
+      echo "dry run: would create a PR via 'gai pr', then attach ${_issue_label} to it."
       _gai_issue_claude_session
       exit 0
     fi
@@ -874,7 +977,7 @@ if [[ "${1:-}" == "issue" ]]; then
     # (branch name, empty commit) are asked immediately, with no slow step
     # between them and the batch above.
     if ! "$0" pr --no-generate; then
-      echo "error: PR creation failed — issue #${_issue_num} not attached." >&2
+      echo "error: PR creation failed — ${_issue_label} not attached." >&2
       exit 1
     fi
 
@@ -887,7 +990,7 @@ if [[ "${1:-}" == "issue" ]]; then
       exit 1
     fi
 
-    echo "→ Attaching #${_issue_num} to the new PR #${_pr_num}."
+    echo "→ Attaching ${_issue_label} to the new PR #${_pr_num}."
   fi
 
   # Everything below is sourced from the PR itself, never from local git: the
@@ -912,22 +1015,30 @@ for c in (d.get('commits') or [])[:40]:
   _prev_nums=$(printf '%s\n' "$_pr_body" | grep -ioE "$_close_re" | grep -oE '[0-9]+' || true)
 
   if [[ "$_issue_remove" == "true" ]]; then
-    if ! printf '%s\n' "$_prev_nums" | grep -qx "$_issue_num"; then
-      echo "→ Issue #$_issue_num is not referenced in PR #$_pr_num — nothing to remove."
-      exit 0
+    # Only the issues the PR actually closes can be removed; say so for the rest
+    # and carry on with the others.
+    _absent=$(printf '%s\n' "$_issue_nums" | grep -vFx "${_prev_nums:-_}" || true)
+    if [[ -n "$_absent" ]]; then
+      _issue_nums=$(printf '%s\n' "$_issue_nums" | grep -vFx "$_absent" || true)
+      echo "→ $(echo "$_absent" | sed 's/^/#/' | tr '\n' ' ' | sed 's/ *$//') not referenced in PR #$_pr_num — nothing to remove there."
+      if [[ -z "$_issue_nums" ]]; then
+        exit 0
+      fi
+      _gai_issue_views
     fi
 
     # || true: with the last remaining number filtered out grep exits 1, and
     # set -e would kill the script right where an empty list is the point.
     _all_nums=$(printf '%s\n' "$_prev_nums" | grep -E '^[0-9]+$' | awk '!seen[$0]++' \
-      | grep -vFx "$_issue_num" || true)
-    echo "→ Removing #$_issue_num from PR #$_pr_num."
+      | grep -vFx "$_issue_nums" || true)
+    echo "→ Removing ${_issue_label} from PR #$_pr_num."
   else
-    # First-seen order, new issue last.
-    _all_nums=$(printf '%s\n%s\n' "$_prev_nums" "$_issue_num" | grep -E '^[0-9]+$' | awk '!seen[$0]++')
+    # First-seen order, new issues last.
+    _all_nums=$(printf '%s\n%s\n' "$_prev_nums" "$_issue_nums" | grep -E '^[0-9]+$' | awk '!seen[$0]++')
 
-    if printf '%s\n' "$_prev_nums" | grep -qx "$_issue_num"; then
-      echo "→ Issue #$_issue_num already referenced in PR #$_pr_num — refreshing title and body."
+    _already=$(printf '%s\n' "$_issue_nums" | grep -Fx "${_prev_nums:-_}" || true)
+    if [[ -n "$_already" ]]; then
+      echo "→ $(echo "$_already" | sed 's/^/#/' | tr '\n' ' ' | sed 's/ *$//') already referenced in PR #$_pr_num — refreshing title and body."
     fi
   fi
 
@@ -941,12 +1052,14 @@ for c in (d.get('commits') or [])[:40]:
   if [[ "$_issue_remove" == "true" ]]; then
     # One pass with the number baked in: two chained greps would match the
     # keyword on one reference and the number on another ("Closes #12, see #34").
-    _stray=$(printf '%s\n' "$_pr_body_clean" \
-      | grep -iE "(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]+#${_issue_num}([^0-9]|\$)" || true)
-    if [[ -n "$_stray" ]]; then
-      echo "⚠ #${_issue_num} is still closed by prose left in the PR body — edit it by hand:"
-      printf '%s\n' "$_stray" | sed 's/^/    /'
-    fi
+    for _n in $_issue_nums; do
+      _stray=$(printf '%s\n' "$_pr_body_clean" \
+        | grep -iE "(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]+#${_n}([^0-9]|\$)" || true)
+      if [[ -n "$_stray" ]]; then
+        echo "⚠ #${_n} is still closed by prose left in the PR body — edit it by hand:"
+        printf '%s\n' "$_stray" | sed 's/^/    /'
+      fi
+    done
   fi
 
   # Rendered once: "#9 #12 #31", no trailing blank. Empty once the last issue is
