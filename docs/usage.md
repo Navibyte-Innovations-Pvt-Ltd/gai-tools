@@ -18,6 +18,7 @@ gai pr           # open a PR from the current branch (offers to branch off main)
 gai issue 123    # attach an issue to a PR and rewrite its title/body, repo from cwd
 gai issue <url>  # same, for an issue in any repo
 gai issue 123 --remove   # detach an issue you attached by mistake
+gai issue 123,456        # several issues (same bug filed twice): one PR, one Claude session
 gai-watch        # start watcher manually
 gai-watch --dry-run  # watch + preview only
 ```
@@ -78,10 +79,21 @@ only ever guarded generation.
 gai issue 123                                        # repo from cwd
 gai issue https://github.com/owner/repo/issues/123   # any repo
 gai issue 123 --remove                               # detach it again
+gai issue 123,456                                    # several at once
 ```
 
 A bare number (or `#123`) resolves against the repo you are standing in, via
 `gh repo view`. A full URL works from anywhere.
+
+**Several issues at once.** Separate them with commas or spaces, and mix numbers
+and URLs if you like. This is for one piece of work filed more than once, such
+as the same bug reported twice. All of them go onto the PR in a single write,
+one `Closes #N` each. The questions are asked once, and **one** Claude session
+starts with every thread in its prompt. That prompt tells Claude the issues are
+probably the same problem: read them all, build one fix, and say so before
+coding if they turn out to be different. They must all live in the same repo,
+because a PR closes issues only in its own repo; a mix is an error. `--remove`
+takes a list too, and skips any issue the PR does not close.
 
 **All the questions come first.** `gai issue` asks everything it needs in one
 block, before the first slow step, then runs to the end without stopping:
@@ -90,7 +102,7 @@ block, before the first slow step, then runs to the end without stopping:
 ── a few questions, then it runs on its own ──
 Create a PR for #354? [Y/n]
 Rewrite the PR title and body from the issue thread? [Y/n]
-Start a Claude session on #354 when this is done? [Y/n]
+Start one Claude session on #354 when this is done? [Y/n]
 Extra instructions for Claude (optional — Ctrl+V pastes an image):
 ```
 
@@ -196,7 +208,7 @@ Then it executes, in order:
    on merge. `gai` checks for it and prints
    `⚠ #34 is still closed by prose left in the PR body` with the offending line
    and its number. It will not rewrite your prose — edit that line by hand.
-3. **Launch Claude.** If you said yes up front, it pulls the issue's title,
+3. **Launch Claude.** If you said yes up front, it pulls each issue's title,
    labels, description and every comment through `gh`, folds in the extra
    instructions line you already typed, and `exec`s `claude` in the current
    directory — so the session starts in your repo, already holding the whole
