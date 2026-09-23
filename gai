@@ -378,6 +378,48 @@ _gai_strip_closes() {
     | python3 -c "import sys; print(sys.stdin.read().rstrip())" || true
 }
 
+# Blocks another tool owns in a PR body, carried from $1 (the PR as it stands)
+# onto $2 (freshly generated prose): the single `<!-- pr-shot: {...} -->` line a
+# fix agent writes, and everything from `<!-- pr-shots:start -->` to
+# `<!-- pr-shots:end -->`, which a screenshot job rewrites on every push. The
+# model only ever sees commits and issues, so a rewrite used to delete both —
+# practise_stack PR #1897 lost its screenshot instruction and the job's note
+# saying why there was no picture. Copies the model echoed are dropped first.
+_gai_keep_owned_blocks() {
+  python3 - "$1" "$2" << 'PY' || printf '%s\n' "$2"
+import re, sys
+
+shot_line = re.compile(r"^\s*<!-- pr-shot: \{.*\} -->\s*$")
+start, end = "<!-- pr-shots:start -->", "<!-- pr-shots:end -->"
+
+def split(text):
+    """(prose lines, pr-shot lines, pr-shots block lines, block closed?)"""
+    prose, shots, block, inside, closed = [], [], [], False, False
+    for line in text.split("\n"):
+        s = line.strip()
+        if s == start and not block:
+            inside = True
+        if inside:
+            block.append(line)
+            if s == end:
+                inside, closed = False, True
+            continue
+        (shots if shot_line.match(line) else prose).append(line)
+    return prose, shots, block, closed
+
+_, shots, block, closed = split(sys.argv[1].rstrip("\n"))
+prose, _, _, _ = split(sys.argv[2].rstrip("\n"))
+# A dropped echo leaves its surrounding blank lines behind; keep one.
+prose = [l for i, l in enumerate(prose) if l.strip() or i == 0 or prose[i - 1].strip()]
+while prose and not prose[-1].strip():
+    prose.pop()
+
+# An unterminated block would swallow the Closes lines appended after it.
+tail = shots[:1] + (([""] if shots else []) + block if block and closed else [])
+print("\n".join(prose + ([""] + tail if tail else [])))
+PY
+}
+
 # A PR body is untrusted markdown — model output, or whatever a human left there.
 # One that leaves a code fence or an HTML comment open swallows everything after
 # it, the Closes block included, and GitHub ignores closing keywords inside code:
@@ -480,6 +522,8 @@ _gai_pr_write() {
     if [[ "$_rewrote" != "true" ]]; then
       _new_title=$(echo "$_fresh_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('title') or '')")
       _new_body=$(_gai_strip_closes "$_fresh_body")
+    else
+      _new_body=$(_gai_keep_owned_blocks "$(_gai_strip_closes "$_fresh_body")" "$_new_body")
     fi
   fi
 
