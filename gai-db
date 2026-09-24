@@ -1,0 +1,427 @@
+#!/usr/bin/env bash
+# gai-db — copy one Postgres database into another, checked end to end.
+# Usage: gai db copy [--to=<url>] [--from=<url>] [--freeze|--no-freeze]
+#        gai db verify [--to=<url>] [--from=<url>]
+#        gai db unfreeze [--from=<url>]
+#
+# copy asks for the NEW database first, then the OLD one, then every other
+# question, and only then starts working:
+#   1. preflight   server versions, sizes, extensions the new side must have
+#   2. freeze      optional: old database read-only, so nothing is written after
+#                  the copy starts (yes for the real move, no for a test copy)
+#   3. dump        pg_dump of the old database to ~/.gai/db-dumps (kept)
+#   4. wipe        only if the new database has tables AND you typed its host
+#   5. restore     pg_restore in ONE transaction — a failure leaves it untouched
+#   6. verify      row count of every table and every sequence, both sides,
+#                  plus Prisma's _prisma_migrations when present
+#
+# URLs are never printed, only host:port/db. They are split into PG* variables
+# so a password with '@' or ':' works and nothing lands in the process list.
+# Prisma-only URL parameters (connection_limit, schema, pgbouncer…) are dropped;
+# libpq refuses them.
+
+set -euo pipefail
+
+DUMP_DIR="${GAI_DB_DUMP_DIR:-$HOME/.gai/db-dumps}"
+
+# Schemas that are never user data.
+SYS_NS="n.nspname not in ('pg_catalog','information_schema') and n.nspname not like 'pg\\_%'"
+
+# User tables: ordinary + partitioned, minus the ones an extension owns
+# (PostGIS's spatial_ref_sys) — those come back with CREATE EXTENSION.
+USER_TABLES_SQL="select quote_ident(n.nspname) || '.' || quote_ident(c.relname)
+  from pg_class c join pg_namespace n on n.oid = c.relnamespace
+  where c.relkind in ('r','p') and $SYS_NS
+    and not exists (select 1 from pg_depend d
+                    where d.classid = 'pg_class'::regclass and d.objid = c.oid and d.deptype = 'e')
+  order by 1"
+
+die() { echo "✗ $*" >&2; exit 1; }
+say() { printf '%s\n' "$*"; }
+phase() { printf '\n\033[1m%s\033[0m\n' "$*"; }
+
+# ── URL → PG* variables ───────────────────────────────────────────────────────
+# Sets <SIDE>_HOST _PORT _USER _PASS _DB _SSL _CB. <SIDE> is SRC or DST.
+
+_load_side() {
+  local side=$1 url=$2 parsed line i=0
+  local fields="HOST PORT USER PASS DB SSL CB"
+  parsed=$(python3 - "$url" "$side" <<'PY'
+import sys, urllib.parse as u
+url, side = sys.argv[1], sys.argv[2]
+s = u.urlsplit(url.strip())
+if s.scheme not in ("postgres", "postgresql"):
+    sys.exit("not a postgres:// or postgresql:// URL")
+if not s.hostname:
+    sys.exit("URL has no host")
+q = dict(u.parse_qsl(s.query))
+host = s.hostname
+# Neon: pg_dump and ALTER DATABASE need the direct endpoint, not PgBouncer.
+if side == "SRC" and "-pooler." in host:
+    host = host.replace("-pooler.", ".")
+local = host in ("localhost", "127.0.0.1", "::1") or host.startswith("/")
+ssl = q.get("sslmode") or ("prefer" if local else "require")
+print(host)
+print(s.port or 5432)
+print(u.unquote(s.username or ""))
+print(u.unquote(s.password or ""))
+print(u.unquote(s.path.lstrip("/")) or "postgres")
+print(ssl)
+print(q.get("channel_binding") or "prefer")
+PY
+) || die "$side database URL: could not read it"
+  while IFS= read -r line; do
+    i=$(( i + 1 ))
+    printf -v "${side}_$(echo "$fields" | cut -d' ' -f"$i")" '%s' "$line"
+  done <<< "$parsed"
+}
+
+_label() { # host:port/db, never the password
+  local h="${1}_HOST" p="${1}_PORT" d="${1}_DB"
+  printf '%s:%s/%s' "${!h}" "${!p}" "${!d}"
+}
+
+_host() { local h="${1}_HOST"; printf '%s' "${!h}"; }
+
+# Run a command with one side's connection in the environment.
+_on() {
+  local side=$1; shift
+  local h="${side}_HOST" p="${side}_PORT" u="${side}_USER" w="${side}_PASS"
+  local d="${side}_DB" s="${side}_SSL" c="${side}_CB"
+  PGHOST="${!h}" PGPORT="${!p}" PGUSER="${!u}" PGPASSWORD="${!w}" PGDATABASE="${!d}" \
+    PGSSLMODE="${!s}" PGCHANNELBINDING="${!c}" PGCONNECT_TIMEOUT=15 PGAPPNAME=gai-db "$@"
+}
+
+# Read-only session: a typo in a check can never change either database.
+q_ro() { _on "$1" env PGOPTIONS='-c default_transaction_read_only=on -c client_min_messages=warning' "$PSQL" -X -A -t -q -v ON_ERROR_STOP=1 -c "$2"; }
+q_rw() { _on "$1" env PGOPTIONS='-c default_transaction_read_only=off -c client_min_messages=warning' "$PSQL" -X -A -t -q -v ON_ERROR_STOP=1 -c "$2"; }
+
+# ── client tools ──────────────────────────────────────────────────────────────
+
+_tool_dirs() { # candidate bin dirs for major $1
+  printf '%s\n' \
+    "/opt/homebrew/opt/postgresql@$1/bin" \
+    "/usr/local/opt/postgresql@$1/bin" \
+    "/Library/PostgreSQL/$1/bin" \
+    "/Applications/Postgres.app/Contents/Versions/$1/bin"
+}
+
+_major_of() { "$1" --version 2>/dev/null | grep -oE '[0-9]+' | head -1; }
+
+# Any psql will do for the first questions (server versions).
+_find_any_psql() {
+  local v dir
+  if [[ -n "${PG_BIN:-}" ]]; then
+    [[ -x "$PG_BIN/psql" ]] || die "PG_BIN=$PG_BIN has no psql"
+    PSQL="$PG_BIN/psql"; return
+  fi
+  for v in 19 18 17 16 15 14 13; do
+    while IFS= read -r dir; do
+      if [[ -x "$dir/psql" ]]; then PSQL="$dir/psql"; return; fi
+    done < <(_tool_dirs "$v")
+  done
+  if command -v psql >/dev/null 2>&1; then PSQL=$(command -v psql); return; fi
+  die "No psql found. Install Postgres client tools: brew install postgresql@17"
+}
+
+# pg_dump / pg_restore / psql of exactly the old server's major version:
+# older refuses to dump a newer server, newer may write what an older one
+# cannot restore.
+_find_tools() {
+  local want=$1 dir found=""
+  if [[ -n "${PG_BIN:-}" ]]; then
+    found="$PG_BIN"
+  else
+    while IFS= read -r dir; do
+      if [[ -x "$dir/pg_dump" ]]; then found="$dir"; break; fi
+    done < <(_tool_dirs "$want")
+    if [[ -z "$found" ]] && command -v pg_dump >/dev/null 2>&1; then
+      found=$(dirname "$(command -v pg_dump)")
+    fi
+  fi
+  [[ -n "$found" ]] || die "No Postgres $want client tools. Install: brew install postgresql@$want (or set PG_BIN)"
+  if [[ "$(_major_of "$found/pg_dump")" != "$want" ]]; then
+    die "Need pg_dump $want (old server is $want), found $(_major_of "$found/pg_dump") at $found. Install: brew install postgresql@$want (or set PG_BIN)"
+  fi
+  PG_DUMP="$found/pg_dump"; PG_RESTORE="$found/pg_restore"; PSQL="$found/psql"
+}
+
+# ── prompts ───────────────────────────────────────────────────────────────────
+
+_ask_url() { # var, prompt
+  local _v
+  read -rsp "$2: " _v || true
+  echo
+  [[ -n "$_v" ]] || die "No URL given."
+  printf -v "$1" '%s' "$_v"
+}
+
+_yes() { # prompt → 0 on y/yes
+  local a
+  read -rp "$1 [y/N] " a || true
+  [[ "$a" == "y" || "$a" == "Y" || "$a" == "yes" ]]
+}
+
+# ── queries ───────────────────────────────────────────────────────────────────
+
+_major() { q_ro "$1" "select current_setting('server_version_num')::int / 10000"; }
+_table_count() { q_ro "$1" "select count(*) from ($USER_TABLES_SQL) t"; }
+
+# "table|rows" for every table in the list, one round trip.
+_row_counts() { # side, newline list of qualified tables
+  local side=$1 list=$2 sql="" t q="'"
+  while IFS= read -r t; do
+    [[ -z "$t" ]] && continue
+    if [[ -n "$sql" ]]; then sql="$sql union all "; fi
+    sql="${sql}select '${t//$q/$q$q}', count(*) from $t"
+  done <<< "$list"
+  [[ -n "$sql" ]] || return 0
+  _on "$side" env PGOPTIONS='-c default_transaction_read_only=on' \
+    "$PSQL" -X -A -t -q -F '|' -v ON_ERROR_STOP=1 -c "$sql"
+}
+
+_sequences() {
+  q_ro "$1" "select quote_ident(schemaname) || '.' || quote_ident(sequencename) || ' ' || coalesce(last_value::text, 'unused')
+             from pg_sequences where schemaname not in ('pg_catalog','information_schema') order by 1"
+}
+
+_prisma() { # "count latest" or empty when the table is absent
+  local has
+  has=$(q_ro "$1" "select to_regclass('public._prisma_migrations') is not null")
+  [[ "$has" == "t" ]] || return 0
+  q_ro "$1" "select count(*) || ' ' || coalesce(max(migration_name), '-') from public._prisma_migrations
+             where finished_at is not null and rolled_back_at is null"
+}
+
+# ── verify ────────────────────────────────────────────────────────────────────
+# Sets VERIFY_DIFF to the number of mismatches. Prints a table.
+
+_verify() {
+  local src_tables dst_tables present missing src_counts dst_counts t a b
+  local sp dp
+  VERIFY_DIFF=0
+  src_tables=$(q_ro SRC "$USER_TABLES_SQL")
+  dst_tables=$(q_ro DST "$USER_TABLES_SQL")
+  present=$(comm -12 <(printf '%s\n' "$src_tables" | sort) <(printf '%s\n' "$dst_tables" | sort))
+  missing=$(comm -23 <(printf '%s\n' "$src_tables" | sort) <(printf '%s\n' "$dst_tables" | sort))
+  src_counts=$(_row_counts SRC "$src_tables")
+  dst_counts=$(_row_counts DST "$present")
+
+  printf '%-48s %12s %12s\n' table old new
+  while IFS= read -r t; do
+    [[ -z "$t" ]] && continue
+    a=$(printf '%s\n' "$src_counts" | awk -F'|' -v k="$t" '$1 == k { print $2 }')
+    if printf '%s\n' "$missing" | grep -qxF "$t"; then
+      b="MISSING"
+    else
+      b=$(printf '%s\n' "$dst_counts" | awk -F'|' -v k="$t" '$1 == k { print $2 }')
+    fi
+    if [[ "$a" == "$b" ]]; then
+      printf '%-48s %12s %12s\n' "$t" "$a" "$b"
+    else
+      printf '%-48s %12s %12s  <-- DIFFERENT\n' "$t" "$a" "$b"
+      VERIFY_DIFF=$(( VERIFY_DIFF + 1 ))
+    fi
+  done <<< "$src_tables"
+
+  local nseq
+  nseq=$(_sequences SRC | grep -c . || true)
+  if [[ "$(_sequences SRC)" == "$(_sequences DST)" ]]; then
+    if [[ "$nseq" -eq 0 ]]; then say "sequences: none"; else say "sequences: all $nseq match"; fi
+  else
+    say "sequences: DIFFERENT"
+    diff <(_sequences SRC) <(_sequences DST) | grep '^[<>]' | sed 's/^</  old/; s/^>/  new/' || true
+    VERIFY_DIFF=$(( VERIFY_DIFF + 1 ))
+  fi
+
+  sp=$(_prisma SRC); dp=$(_prisma DST)
+  if [[ -n "$sp" || -n "$dp" ]]; then
+    if [[ "$sp" == "$dp" ]]; then
+      say "prisma migrations: ${sp% *} applied on both, latest ${sp#* }"
+    else
+      say "prisma migrations: DIFFERENT — old: ${sp:-none}, new: ${dp:-none}"
+      VERIFY_DIFF=$(( VERIFY_DIFF + 1 ))
+    fi
+  fi
+}
+
+# ── args ──────────────────────────────────────────────────────────────────────
+
+CMD="${1:-}"
+[[ $# -gt 0 ]] && shift
+TO_URL="${GAI_DB_TO:-}"
+FROM_URL="${GAI_DB_FROM:-}"
+FREEZE_FLAG=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --to=*)      TO_URL="${1#--to=}" ;;
+    --to)        TO_URL="${2:-}"; shift ;;
+    --from=*)    FROM_URL="${1#--from=}" ;;
+    --from)      FROM_URL="${2:-}"; shift ;;
+    --freeze)    FREEZE_FLAG=yes ;;
+    --no-freeze) FREEZE_FLAG=no ;;
+    *) die "Unknown option: $1 (see: gai db --help)" ;;
+  esac
+  shift
+done
+
+usage() {
+  sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+  say ""
+  say "Env: GAI_DB_TO / GAI_DB_FROM (URLs), PG_BIN (client tools dir), GAI_DB_DUMP_DIR"
+}
+
+case "$CMD" in
+  copy|verify)
+    if [[ -z "$TO_URL" ]]; then _ask_url TO_URL "NEW database URL (copy INTO — hidden)"; fi
+    if [[ -z "$FROM_URL" ]]; then _ask_url FROM_URL "OLD database URL (copy FROM — hidden)"; fi
+    _load_side DST "$TO_URL"
+    _load_side SRC "$FROM_URL"
+    say "Old (from): $(_label SRC)"
+    say "New (into): $(_label DST)"
+    [[ "$(_label SRC)" != "$(_label DST)" ]] || die "Old and new are the same database."
+    _find_any_psql
+    ;;
+  unfreeze)
+    if [[ -z "$FROM_URL" ]]; then _ask_url FROM_URL "OLD database URL to make writable again (hidden)"; fi
+    _load_side SRC "$FROM_URL"
+    _find_any_psql
+    db=$(q_ro SRC "select current_database()")
+    q_rw SRC "alter database \"$db\" reset default_transaction_read_only" >/dev/null
+    say "✓ $(_label SRC) is writable again."
+    exit 0
+    ;;
+  ""|-h|--help|help) usage; exit 0 ;;
+  *) die "Unknown: gai db $CMD (see: gai db --help)" ;;
+esac
+
+# ── preflight ─────────────────────────────────────────────────────────────────
+
+phase "1/6 Checking both databases…"
+SRC_MAJOR=$(_major SRC) || die "Cannot connect to the old database $(_label SRC)"
+DST_MAJOR=$(_major DST) || die "Cannot connect to the new database $(_label DST)"
+_find_tools "$SRC_MAJOR"
+say "Old: Postgres $SRC_MAJOR, $(q_ro SRC "select pg_size_pretty(pg_database_size(current_database()))"), $(_table_count SRC) tables"
+say "New: Postgres $DST_MAJOR, $(_table_count DST) tables"
+say "Tools: $(dirname "$PG_DUMP") (v$SRC_MAJOR)"
+
+if [[ "$CMD" == "verify" ]]; then
+  phase "Verifying…"
+  _verify
+  if [[ "$VERIFY_DIFF" -eq 0 ]]; then say "✓ VERIFY PASSED"; exit 0; fi
+  die "VERIFY: $VERIFY_DIFF difference(s)"
+fi
+
+if [[ "$DST_MAJOR" -lt "$SRC_MAJOR" ]]; then
+  die "New server is Postgres $DST_MAJOR, older than the old one ($SRC_MAJOR). A dump does not restore reliably into an older major."
+fi
+
+ext_missing=""
+while IFS='|' read -r ext ver; do
+  [[ -z "$ext" ]] && continue
+  avail=$(q_ro DST "select coalesce(max(default_version), '') from pg_available_extensions where name = '$ext'")
+  if [[ -z "$avail" ]]; then
+    say "  extension $ext $ver — NOT AVAILABLE on new"
+    ext_missing="$ext_missing $ext"
+  else
+    say "  extension $ext $ver → new has $avail"
+  fi
+done < <(q_ro SRC "select extname || '|' || extversion from pg_extension where extname <> 'plpgsql' order by 1")
+[[ -z "$ext_missing" ]] || die "New server lacks:$ext_missing. Install them on that server (or use an image that has them) first."
+
+# ── every question, up front ──────────────────────────────────────────────────
+
+phase "Questions (nothing has changed yet)"
+FREEZE=false
+if [[ "$FREEZE_FLAG" == "yes" ]]; then
+  FREEZE=true
+elif [[ -z "$FREEZE_FLAG" ]]; then
+  if _yes "Make the OLD database read-only before copying? (yes = real move, no = test copy)"; then FREEZE=true; fi
+fi
+
+WIPE=false
+DST_TABLES=$(_table_count DST)
+if [[ "$DST_TABLES" != "0" ]]; then
+  say "The NEW database already has $DST_TABLES tables. Continuing deletes EVERYTHING in it."
+  read -rp "Type the new host ($(_host DST)) to delete it all, anything else stops: " typed || true
+  [[ "$typed" == "$(_host DST)" ]] || die "Host did not match — nothing changed."
+  WIPE=true
+fi
+
+say ""
+say "Plan: $([[ $FREEZE == true ]] && echo "freeze old → ")dump → $([[ $WIPE == true ]] && echo "wipe new → ")restore → verify"
+_yes "Start?" || die "Stopped — nothing changed."
+
+# ── freeze ────────────────────────────────────────────────────────────────────
+
+if [[ "$FREEZE" == true ]]; then
+  phase "2/6 Freezing the old database…"
+  SRC_DBNAME=$(q_ro SRC "select current_database()")
+  q_rw SRC "alter database \"$SRC_DBNAME\" set default_transaction_read_only = on" >/dev/null
+  # Open sessions keep their old setting; close them so they reconnect read-only.
+  closed=$(q_rw SRC "select count(pg_terminate_backend(pid)) from pg_stat_activity
+                     where datname = current_database() and pid <> pg_backend_pid()" 2>/dev/null || echo "?")
+  say "✓ Old database is READ-ONLY ($closed sessions closed). Undo: gai db unfreeze"
+else
+  phase "2/6 Not freezing (test copy) — rows written from now on will not be in the copy."
+fi
+
+# ── dump ──────────────────────────────────────────────────────────────────────
+
+phase "3/6 Dumping the old database…"
+mkdir -p "$DUMP_DIR"; chmod 700 "$DUMP_DIR"
+DUMP_FILE="$DUMP_DIR/$(_host SRC | tr -c 'A-Za-z0-9.\n-' '_')-${SRC_DB}-$(date +%Y%m%d-%H%M%S).dump"
+( umask 077; _on SRC "$PG_DUMP" --format=custom --no-owner --no-privileges --file="$DUMP_FILE" ) \
+  || die "pg_dump failed. Nothing on the new database changed.$([[ $FREEZE == true ]] && echo " Old is still frozen — gai db unfreeze")"
+TOC=$("$PG_RESTORE" --list "$DUMP_FILE")
+DATA_ENTRIES=$(printf '%s\n' "$TOC" | grep -c ' TABLE DATA ' || true)
+say "✓ $DUMP_FILE ($(du -h "$DUMP_FILE" | cut -f1), $DATA_ENTRIES tables with data)"
+
+# ── wipe ──────────────────────────────────────────────────────────────────────
+
+if [[ "$WIPE" == true ]]; then
+  phase "4/6 Emptying the new database…"
+  schemas=$(q_ro DST "select quote_ident(nspname) from pg_namespace n where $SYS_NS order by 1")
+  drop_sql=""
+  while IFS= read -r s; do
+    [[ -z "$s" ]] && continue
+    drop_sql="${drop_sql}drop schema $s cascade; "
+  done <<< "$schemas"
+  # Recreate public unless the dump creates it itself.
+  if ! printf '%s\n' "$TOC" | grep -qE ' SCHEMA - public '; then
+    drop_sql="${drop_sql}create schema public;"
+  fi
+  q_rw DST "$drop_sql" >/dev/null
+  [[ "$(_table_count DST)" == "0" ]] || die "New database still has tables after wiping."
+  say "✓ New database is empty"
+else
+  phase "4/6 New database is already empty"
+fi
+
+# ── restore ───────────────────────────────────────────────────────────────────
+
+phase "5/6 Restoring into the new database (all or nothing)…"
+if ! _on DST "$PG_RESTORE" --no-owner --no-privileges --single-transaction --exit-on-error \
+       --dbname="$DST_DB" "$DUMP_FILE"; then
+  die "Restore failed and was rolled back — the new database has nothing from this run. Fix the error above and run gai db copy again.$([[ $FREEZE == true ]] && echo " Old is still frozen — gai db unfreeze")"
+fi
+q_rw DST "analyze" >/dev/null
+say "✓ Restored"
+
+# ── verify ────────────────────────────────────────────────────────────────────
+
+phase "6/6 Verifying…"
+_verify
+echo
+if [[ "$VERIFY_DIFF" -eq 0 ]]; then
+  say "✓ VERIFY PASSED — every table, sequence and migration matches."
+  if [[ "$FREEZE" == true ]]; then
+    say "  Point your app at the new database. Rollback: point it back, then gai db unfreeze."
+  fi
+  exit 0
+fi
+if [[ "$FREEZE" == true ]]; then
+  die "VERIFY FAILED — $VERIFY_DIFF difference(s) while the old database was frozen. Do NOT switch."
+fi
+say "⚠ $VERIFY_DIFF difference(s). The old database was not frozen, so rows written"
+say "  after the dump are expected to differ. A MISSING table or a big gap is not."
