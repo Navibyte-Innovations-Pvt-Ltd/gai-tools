@@ -70,7 +70,7 @@ print(u.unquote(s.path.lstrip("/")) or "postgres")
 print(ssl)
 print(q.get("channel_binding") or "prefer")
 PY
-) || die "$side database URL: could not read it"
+) || die "$([[ $side == DST ]] && echo New || echo Old) database URL: could not read it. It must start with postgresql://"
   while IFS= read -r line; do
     i=$(( i + 1 ))
     printf -v "${side}_$(echo "$fields" | cut -d' ' -f"$i")" '%s' "$line"
@@ -151,9 +151,13 @@ _find_tools() {
 
 _ask_url() { # var, prompt
   local _v
-  read -rsp "$2: " _v || true
+  # Hidden because the URL carries the password — so nothing appears while you
+  # paste. The caller echoes host:port/db right after, to show it arrived.
+  read -rsp "$2 (paste, then Enter): " _v || true
   echo
-  [[ -n "$_v" ]] || die "No URL given."
+  # Terminals can wrap a paste in bracketed-paste markers; drop them and spaces.
+  _v=$(printf '%s' "$_v" | sed -e $'s/\x1b\\[20[01]~//g' | tr -d '[:space:]')
+  [[ -n "$_v" ]] || die "Nothing was pasted. Copy the URL again and retry."
   printf -v "$1" '%s' "$_v"
 }
 
@@ -340,18 +344,19 @@ usage() {
 
 case "$CMD" in
   copy|verify)
-    if [[ -z "$TO_URL" ]]; then _ask_url TO_URL "NEW database URL (copy INTO — hidden)"; fi
-    if [[ -z "$FROM_URL" ]]; then _ask_url FROM_URL "OLD database URL (copy FROM — hidden)"; fi
+    if [[ -z "$TO_URL" ]]; then _ask_url TO_URL "NEW database URL (copy INTO, hidden)"; fi
     _load_side DST "$TO_URL"
+    say "  ✓ New (into): $(_label DST)"
+    if [[ -z "$FROM_URL" ]]; then _ask_url FROM_URL "OLD database URL (copy FROM, hidden)"; fi
     _load_side SRC "$FROM_URL"
-    say "Old (from): $(_label SRC)"
-    say "New (into): $(_label DST)"
+    say "  ✓ Old (from): $(_label SRC)"
     [[ "$(_label SRC)" != "$(_label DST)" ]] || die "Old and new are the same database."
     _find_any_psql
     ;;
   unfreeze)
     if [[ -z "$FROM_URL" ]]; then _ask_url FROM_URL "OLD database URL to make writable again (hidden)"; fi
     _load_side SRC "$FROM_URL"
+    say "  ✓ Old: $(_label SRC)"
     _find_any_psql
     db=$(q_ro SRC "select current_database()")
     q_rw SRC "alter database \"$db\" reset default_transaction_read_only" >/dev/null
