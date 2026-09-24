@@ -19,7 +19,7 @@ gai issue 123    # attach an issue to a PR and rewrite its title/body, repo from
 gai issue <url>  # same, for an issue in any repo
 gai issue 123 --remove   # detach an issue you attached by mistake
 gai issue 123,456        # several issues (same bug filed twice): one PR, one Claude session
-gai db copy      # copy one Postgres database into another, checked
+gai db           # menu: copy / verify / unfreeze a Postgres database
 gai-watch        # start watcher manually
 gai-watch --dry-run  # watch + preview only
 ```
@@ -260,7 +260,8 @@ Flags and edge cases:
 ## Copying a Database
 
 ```bash
-gai db copy                   # asks: NEW database URL, then OLD database URL
+gai db                        # menu: Copy / Verify / Unfreeze / Help / Quit (↑/↓, Enter)
+gai db copy                   # skip the menu: asks NEW database URL, then OLD database URL
 gai db verify                 # row counts again, any time
 gai db unfreeze               # make the old database writable again (rollback)
 ```
