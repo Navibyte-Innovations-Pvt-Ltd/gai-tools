@@ -102,7 +102,7 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.VERSION }}"
           ARCHIVE="gai-tools-${VERSION}.tar.gz"
-          tar -czf "$ARCHIVE" gai gai-watch install.sh uninstall.sh README.md LICENSE CHANGELOG.md docs/
+          tar -czf "$ARCHIVE" gai gai-watch gai-db install.sh uninstall.sh README.md LICENSE CHANGELOG.md docs/
           cp "$ARCHIVE" gai-tools-latest.tar.gz
           echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
 
