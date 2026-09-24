@@ -150,13 +150,24 @@ _find_tools() {
 # ── prompts ───────────────────────────────────────────────────────────────────
 
 _ask_url() { # var, prompt
-  local _v
-  # Hidden because the URL carries the password — so nothing appears while you
-  # paste. The caller echoes host:port/db right after, to show it arrived.
-  read -rsp "$2 (paste, then Enter): " _v || true
+  # Shows one * per character: the URL carries the password, but you still see
+  # the paste land. Backspace works; Enter finishes.
+  local _v="" _c _e
+  printf '%s (Cmd+V, then Enter): ' "$2"
+  while IFS= read -rsn1 _c; do
+    case "$_c" in
+      ''|$'\r'|$'\n') break ;;
+      $'\x7f'|$'\b')
+        if [[ -n "$_v" ]]; then _v=${_v%?}; printf '\b \b'; fi ;;
+      $'\x1b')
+        # Bracketed-paste markers (ESC[200~ / ESC[201~) and arrow keys: swallow.
+        IFS= read -rsn5 -t 1 _e || true ;;
+      *)
+        _v="$_v$_c"; printf '*' ;;
+    esac
+  done
   echo
-  # Terminals can wrap a paste in bracketed-paste markers; drop them and spaces.
-  _v=$(printf '%s' "$_v" | sed -e $'s/\x1b\\[20[01]~//g' | tr -d '[:space:]')
+  _v=$(printf '%s' "$_v" | tr -d '[:space:]')
   [[ -n "$_v" ]] || die "Nothing was pasted. Copy the URL again and retry."
   printf -v "$1" '%s' "$_v"
 }
@@ -344,17 +355,17 @@ usage() {
 
 case "$CMD" in
   copy|verify)
-    if [[ -z "$TO_URL" ]]; then _ask_url TO_URL "NEW database URL (copy INTO, hidden)"; fi
+    if [[ -z "$TO_URL" ]]; then _ask_url TO_URL "NEW database URL (copy INTO)"; fi
     _load_side DST "$TO_URL"
     say "  ✓ New (into): $(_label DST)"
-    if [[ -z "$FROM_URL" ]]; then _ask_url FROM_URL "OLD database URL (copy FROM, hidden)"; fi
+    if [[ -z "$FROM_URL" ]]; then _ask_url FROM_URL "OLD database URL (copy FROM)"; fi
     _load_side SRC "$FROM_URL"
     say "  ✓ Old (from): $(_label SRC)"
     [[ "$(_label SRC)" != "$(_label DST)" ]] || die "Old and new are the same database."
     _find_any_psql
     ;;
   unfreeze)
-    if [[ -z "$FROM_URL" ]]; then _ask_url FROM_URL "OLD database URL to make writable again (hidden)"; fi
+    if [[ -z "$FROM_URL" ]]; then _ask_url FROM_URL "OLD database URL to make writable again"; fi
     _load_side SRC "$FROM_URL"
     say "  ✓ Old: $(_label SRC)"
     _find_any_psql
