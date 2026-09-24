@@ -396,7 +396,14 @@ if [[ "$CMD" == "verify" ]]; then
 fi
 
 if [[ "$DST_MAJOR" -lt "$SRC_MAJOR" ]]; then
-  die "New server is Postgres $DST_MAJOR, older than the old one ($SRC_MAJOR). A dump does not restore reliably into an older major."
+  say ""
+  say "⚠ New server is Postgres $DST_MAJOR, OLDER than the old one ($SRC_MAJOR)."
+  say "  Postgres only promises a copy into the same or a newer version. A $SRC_MAJOR dump"
+  say "  can use settings or features $DST_MAJOR does not know, and the restore will error."
+  say "  Simple databases often still copy fine. If it fails, the restore is rolled back"
+  say "  and the new database is left exactly as it was — nothing is half-copied."
+  _yes "Go ahead anyway?" || die "Stopped — nothing changed."
+  OLDER_TARGET=true
 fi
 
 ext_missing=""
@@ -486,6 +493,9 @@ fi
 phase "5/6 Restoring into the new database (all or nothing)…"
 if ! _on DST "$PG_RESTORE" --no-owner --no-privileges --single-transaction --exit-on-error \
        --dbname="$DST_DB" "$DUMP_FILE"; then
+  if [[ "${OLDER_TARGET:-false}" == true ]]; then
+    say "  Likely cause: the new server (Postgres $DST_MAJOR) is older than the old one ($SRC_MAJOR) — see the error above."
+  fi
   die "Restore failed and was rolled back — the new database has nothing from this run. Fix the error above and run gai db copy again.$([[ $FREEZE == true ]] && echo " Old is still frozen — gai db unfreeze")"
 fi
 q_rw DST "analyze" >/dev/null
