@@ -17,4 +17,4 @@ jobs:
         run: sudo apt-get install -y shellcheck
 
       - name: Lint scripts
-        run: shellcheck -s bash gai gai-watch install.sh uninstall.sh
+        run: shellcheck -s bash gai gai-watch gai-db install.sh uninstall.sh
