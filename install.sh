@@ -131,6 +131,10 @@ echo "→ Installing gai-watch to $INSTALL_DIR/gai-watch…"
 cp "$SCRIPT_DIR/gai-watch" "$INSTALL_DIR/gai-watch"
 chmod +x "$INSTALL_DIR/gai-watch"
 
+echo "→ Installing gai-db to $INSTALL_DIR/gai-db…"
+cp "$SCRIPT_DIR/gai-db" "$INSTALL_DIR/gai-db"
+chmod +x "$INSTALL_DIR/gai-db"
+
 # ── ensure ~/.local/bin is in PATH ───────────────────────────────────────────
 
 if ! grep -q 'HOME/.local/bin' "$ZSHRC" 2>/dev/null; then
