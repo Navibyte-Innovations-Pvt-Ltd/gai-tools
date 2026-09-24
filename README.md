@@ -62,6 +62,8 @@ The installer handles everything: Homebrew check, `fswatch`, `ollama`, model dow
 | `gai issue <n\|url>` | Ask everything up front (create a PR? rewrite title and body? start Claude?), then run it all: attach the issue to an open PR (opening one if none exist), rewrite that PR's title and body from the issue thread, keep every previous `Closes #N` and add the new one, and launch a Claude session seeded with the full thread, plus any screenshots you paste with Ctrl+V |
 | `gai issue <n\|url> --remove` | Undo of the above — drop that issue's `Closes #N` from the PR, keep the rest, and rewrite the title and body from the issues that are left |
 | `gai issue <n\|url>,<n\|url>…` | Same, for several issues that are one piece of work (e.g. a bug filed twice): all attached in one write, and one Claude session gets every thread |
+| `gai db copy` | Copy one Postgres database into another: asks for the new URL, then the old one, checks versions and extensions, optionally freezes the old one, restores all-or-nothing and compares every table's row count — see [docs/usage.md](docs/usage.md#copying-a-database) |
+| `gai db verify` / `gai db unfreeze` | Re-run the row-count check / make a frozen old database writable again |
 | `gai-watch` | Start watcher manually |
 | `gai-watch --dry-run` | Watch + preview only |
 | `gai --help` | Show help |
