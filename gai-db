@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # gai-db — copy one Postgres database into another, checked end to end.
-# Usage: gai db copy [--to=<url>] [--from=<url>] [--freeze|--no-freeze]
+# Usage: gai db                  (menu: pick what to do with arrow keys)
+#        gai db copy [--to=<url>] [--from=<url>] [--freeze|--no-freeze]
 #        gai db verify [--to=<url>] [--from=<url>]
 #        gai db unfreeze [--from=<url>]
 #
@@ -162,6 +163,54 @@ _yes() { # prompt → 0 on y/yes
   [[ "$a" == "y" || "$a" == "Y" || "$a" == "yes" ]]
 }
 
+# Arrow-key menu, same look as gai's. Sets _MENU_RESULT (0-based). Piped
+# input (no terminal) falls back to typing the number.
+_select_menu() {
+  local _idx=0 _count=$# _key _esc _i _opt _drawn=0 _n
+  if [[ ! -t 0 ]]; then
+    _i=1
+    for _opt in "$@"; do printf '  %d) %s\n' "$_i" "$_opt"; _i=$(( _i + 1 )); done
+    read -r _n || true
+    if [[ "$_n" =~ ^[0-9]+$ && "$_n" -ge 1 && "$_n" -le "$_count" ]]; then
+      _MENU_RESULT=$(( _n - 1 ))
+    else
+      _MENU_RESULT=$(( _count - 1 ))
+    fi
+    return
+  fi
+  tput civis 2>/dev/null || true
+  _menu_draw() {
+    if [[ "$_drawn" -eq 1 ]]; then printf "\033[%dA" "$_count"; fi
+    _i=0
+    for _opt in "$@"; do
+      printf "\033[2K"
+      if [[ "$_i" -eq "$_idx" ]]; then
+        printf "  \033[7m▶ %s\033[0m\n" "$_opt"
+      else
+        printf "    %s\n" "$_opt"
+      fi
+      _i=$(( _i + 1 ))
+    done
+    _drawn=1
+  }
+  _menu_draw "$@"
+  while true; do
+    IFS= read -rsn1 _key
+    if [[ "$_key" == $'\x1b' ]]; then
+      IFS= read -rsn2 -t 1 _esc || true
+      case "$_esc" in
+        '[A') if [[ "$_idx" -gt 0 ]]; then _idx=$(( _idx - 1 )); fi ;;
+        '[B') if [[ "$_idx" -lt $(( _count - 1 )) ]]; then _idx=$(( _idx + 1 )); fi ;;
+      esac
+      _menu_draw "$@"
+    elif [[ "$_key" == '' || "$_key" == $'\r' ]]; then
+      break
+    fi
+  done
+  tput cnorm 2>/dev/null || true
+  _MENU_RESULT=$_idx
+}
+
 # ── queries ───────────────────────────────────────────────────────────────────
 
 _major() { q_ro "$1" "select current_setting('server_version_num')::int / 10000"; }
@@ -249,6 +298,24 @@ _verify() {
 
 CMD="${1:-}"
 [[ $# -gt 0 ]] && shift
+
+if [[ -z "$CMD" ]]; then
+  echo "What do you want to do? (↑/↓, Enter)"
+  _select_menu \
+    "Copy a database into another   (asks: new URL, then old URL)" \
+    "Verify a copy                  (row counts, both sides)" \
+    "Unfreeze the old database      (rollback after a frozen copy)" \
+    "Help" \
+    "Quit"
+  case "$_MENU_RESULT" in
+    0) CMD=copy ;;
+    1) CMD=verify ;;
+    2) CMD=unfreeze ;;
+    3) CMD=help ;;
+    *) exit 0 ;;
+  esac
+  echo
+fi
 TO_URL="${GAI_DB_TO:-}"
 FROM_URL="${GAI_DB_FROM:-}"
 FREEZE_FLAG=""
@@ -266,7 +333,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 usage() {
-  sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
   say ""
   say "Env: GAI_DB_TO / GAI_DB_FROM (URLs), PG_BIN (client tools dir), GAI_DB_DUMP_DIR"
 }
@@ -291,7 +358,7 @@ case "$CMD" in
     say "✓ $(_label SRC) is writable again."
     exit 0
     ;;
-  ""|-h|--help|help) usage; exit 0 ;;
+  -h|--help|help) usage; exit 0 ;;
   *) die "Unknown: gai db $CMD (see: gai db --help)" ;;
 esac
 
