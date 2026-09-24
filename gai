@@ -1302,6 +1302,7 @@ for arg in "$@"; do
       echo "                 A bare number resolves against the repo you are standing in."
       echo "                 --remove (-r) detaches instead: drops that issue's 'Closes #N',"
       echo "                 keeps the rest, and rewrites the title and body from what is left."
+      echo "  db           : menu — copy / verify / unfreeze a Postgres database"
       echo "  db copy      : copy one Postgres database into another — asks for the new URL,"
       echo "                 then the old one; optional freeze, all-or-nothing restore, row-count"
       echo "                 check of every table. Also: db verify, db unfreeze. gai db --help"
