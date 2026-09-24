@@ -19,6 +19,7 @@
   "files": [
     "gai",
     "gai-watch",
+    "gai-db",
     "install.sh",
     "uninstall.sh",
     "README.md",

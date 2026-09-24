@@ -19,6 +19,7 @@ gai issue 123    # attach an issue to a PR and rewrite its title/body, repo from
 gai issue <url>  # same, for an issue in any repo
 gai issue 123 --remove   # detach an issue you attached by mistake
 gai issue 123,456        # several issues (same bug filed twice): one PR, one Claude session
+gai db           # menu: copy / verify / unfreeze a Postgres database
 gai-watch        # start watcher manually
 gai-watch --dry-run  # watch + preview only
 ```
@@ -255,6 +256,49 @@ Flags and edge cases:
   it *would* have created, since it writes nothing either way.
 - No `claude` on `PATH` skips the session question silently.
 - Declining PR creation skips the attach but still offers the session.
+
+## Copying a Database
+
+```bash
+gai db                        # menu: Copy / Verify / Unfreeze / Help / Quit (↑/↓, Enter)
+gai db copy                   # skip the menu: asks NEW database URL, then OLD database URL
+gai db verify                 # row counts again, any time
+gai db unfreeze               # make the old database writable again (rollback)
+```
+
+Moves a whole Postgres database — every schema, table, row, sequence and
+extension, Prisma's `_prisma_migrations` included — from one server to another
+(e.g. Neon → Railway). Works for any project; nothing is project-specific.
+
+URLs are typed hidden and never printed — only `host:port/db`. Pass them
+non-interactively with `--to=` / `--from=` or `GAI_DB_TO` / `GAI_DB_FROM`.
+Prisma-only URL parameters (`connection_limit`, `schema`, `pgbouncer`) are
+dropped, a Neon `-pooler` host is swapped for the direct one, and remote hosts
+get `sslmode=require` unless the URL says otherwise.
+
+Every question comes before anything changes:
+
+| Question | Answer |
+|---|---|
+| Make the OLD database read-only first? | **yes** for the real move (nothing written after the copy starts), **no** for a test copy while the site keeps running. `--freeze` / `--no-freeze` answer it ahead. |
+| NEW database already has tables | Type its host exactly to delete everything in it. Anything else stops with nothing changed. There is no flag for this on purpose. |
+| Start? | Last chance; nothing has changed yet. |
+
+Then: preflight → (freeze) → dump → (wipe) → restore → verify.
+
+- **Preflight** refuses a new server older than the old one, and lists every
+  extension the old one uses (PostGIS…) with the version the new one offers —
+  a missing extension stops the run.
+- **Client tools** must match the old server's major version. Found in Homebrew
+  `postgresql@N`, `/Library/PostgreSQL/N/bin` (EDB), Postgres.app, or `PATH`;
+  override with `PG_BIN=`. Missing? `brew install postgresql@17`.
+- **Dump** is kept at `~/.gai/db-dumps/` (mode 700; `GAI_DB_DUMP_DIR` to move it).
+  It holds your whole database — delete it when you are done.
+- **Restore** runs in one transaction: a failure leaves the new database exactly
+  as it was, so just run it again.
+- **Verify** compares every table's row count and every sequence, plus Prisma
+  migration count and latest name. Frozen: any difference fails (exit 1, do not
+  switch). Not frozen: differences are warnings — rows written after the dump.
 
 ## Commit Format
 

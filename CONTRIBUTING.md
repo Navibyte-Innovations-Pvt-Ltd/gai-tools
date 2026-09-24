@@ -34,7 +34,7 @@ git checkout -b feat/your-feature
 
 - Edit `gai`, `gai-watch`, `install.sh`, or `uninstall.sh`
 - Test locally: `bash install.sh && source ~/.zshrc`
-- Run shellcheck: `shellcheck -s bash gai gai-watch install.sh uninstall.sh`
+- Run shellcheck: `shellcheck -s bash gai gai-watch gai-db install.sh uninstall.sh`
 - **Update `CHANGELOG.md`** under `[Unreleased]` — CI auto-fills it if you forget, but better to write it yourself
 
 ### 4. Open a PR

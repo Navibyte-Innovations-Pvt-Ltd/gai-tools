@@ -9,6 +9,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) — [Semantic V
 ## [Unreleased]
 ### Added
 
+- feat(gai-db): `gai db copy` copies one Postgres database into another for any
+  project. Asks for the new URL, then the old one (hidden, never printed), checks
+  server versions and extensions, optionally freezes the old database, wipes a
+  non-empty target only after its host is typed, restores in one transaction and
+  compares every table's row count, every sequence and Prisma's migrations.
+  `gai db verify` re-checks; `gai db unfreeze` rolls a freeze back
+
 - feat(gai): `gai issue` can hand Claude screenshots. Ctrl+V at the
   `Extra instructions for Claude` prompt pastes the copied image and types
   `[Image #N]` into the line, as in Claude Code; deleting the marker before Enter

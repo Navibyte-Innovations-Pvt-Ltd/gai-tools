@@ -697,6 +697,20 @@ ${_img_list}"
   exec claude "$_prompt"
 }
 
+# 'gai db …' copies databases — its own script, nothing to do with commits.
+if [[ "${1:-}" == "db" ]]; then
+  shift
+  _gai_db="$(dirname "$0")/gai-db"
+  if [[ ! -x "$_gai_db" ]]; then
+    _gai_db=$(command -v gai-db || true)
+  fi
+  if [[ -z "$_gai_db" ]]; then
+    echo "gai-db is not installed — run: gai update" >&2
+    exit 1
+  fi
+  exec "$_gai_db" "$@"
+fi
+
 if [[ "${1:-}" == "issue" ]]; then
   _issue_args=""
   _issue_dry_run=false
@@ -1243,7 +1257,7 @@ for arg in "$@"; do
       exit 0
       ;;
     remove|uninstall)
-      echo "This will remove gai/gai-watch, stop all watchers, and remove the ~/.zshrc hook."
+      echo "This will remove gai/gai-watch/gai-db, stop all watchers, and remove the ~/.zshrc hook."
       read -rp "Continue? [y/N] " _confirm || true
       if [[ "$_confirm" != "y" && "$_confirm" != "Y" ]]; then
         echo "Aborted."
@@ -1258,7 +1272,7 @@ for arg in "$@"; do
         echo "✓ Removed hook from ~/.zshrc"
       fi
 
-      rm -f "$HOME/.local/bin/gai" "$HOME/.local/bin/gai-watch"
+      rm -f "$HOME/.local/bin/gai" "$HOME/.local/bin/gai-watch" "$HOME/.local/bin/gai-db"
       echo "✓ Removed gai and gai-watch from ~/.local/bin"
 
       echo ""
@@ -1268,7 +1282,7 @@ for arg in "$@"; do
       exit 0
       ;;
     --help|-h)
-      echo "Usage: gai [--all] [--dry-run] [--force] [--version] [--logs] [update] [pr] [issue <n|url>] [pause] [resume] [remove]"
+      echo "Usage: gai [--all] [--dry-run] [--force] [--version] [--logs] [update] [pr] [issue <n|url>] [db <copy|verify|unfreeze>] [pause] [resume] [remove]"
       echo "  Default      : commit staged files one by one (AI message per file)"
       echo "  --all        : commit all dirty files instead of staged"
       echo "  --dry-run    : show messages without committing"
@@ -1288,9 +1302,13 @@ for arg in "$@"; do
       echo "                 A bare number resolves against the repo you are standing in."
       echo "                 --remove (-r) detaches instead: drops that issue's 'Closes #N',"
       echo "                 keeps the rest, and rewrites the title and body from what is left."
+      echo "  db           : menu — copy / verify / unfreeze a Postgres database"
+      echo "  db copy      : copy one Postgres database into another — asks for the new URL,"
+      echo "                 then the old one; optional freeze, all-or-nothing restore, row-count"
+      echo "                 check of every table. Also: db verify, db unfreeze. gai db --help"
       echo "  pause        : stop auto-commit (gai pr / gai issue keep working)"
       echo "  resume       : re-enable auto-commit after 'gai pause'"
-      echo "  remove       : uninstall gai/gai-watch (alias: uninstall)"
+      echo "  remove       : uninstall gai/gai-watch/gai-db (alias: uninstall)"
       echo ""
       echo "Model: \$GAI_MODEL (default: $MODEL)"
       echo "Secret allowlist: \$GAI_ALLOW_PATHS (colon-separated globs) or 'allow=<glob>' lines in <repo>/.gairc"
