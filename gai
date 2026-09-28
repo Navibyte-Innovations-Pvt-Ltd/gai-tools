@@ -110,7 +110,7 @@ except Exception:
 
 # $1 = branch, $2 = commit list, $3 = issue context (optional).
 _gai_gen_pr_title() {
-  local _branch="$1" _commits="$2" _issues="${3:-}" _prompt _out _title
+  local _branch="$1" _commits="$2" _issues="${3:-}" _stat="${4:-}" _prompt _out _title
 
   _prompt="Generate a GitHub pull request title for this branch.
 Reply with ONLY the title on one line. No explanation. No backticks. No quotes. No trailing period.
@@ -122,10 +122,20 @@ Rules:
 - description: imperative mood, HARD LIMIT 50 chars after the colon
 - Total title MUST be under 72 characters. Count carefully.
 - Every word must come from the real work described below.
+- Summarize the branch AS A WHOLE. The commits are per-file auto-commits; do not
+  copy one commit's subject. Pick the type and scope that fit most of the files
+  in the diff stat, and describe the overall change they add up to.
 
 Branch: $_branch
 Commits:
 $_commits"
+
+  if [[ -n "$_stat" ]]; then
+    _prompt="${_prompt}
+
+Diff stat (all files changed on the branch):
+$_stat"
+  fi
 
   if [[ -n "$_issues" ]]; then
     _prompt="${_prompt}
@@ -808,7 +818,20 @@ if [[ "${1:-}" == "issue" ]]; then
   _pr_list=()
   while IFS= read -r _line; do
     [[ -n "$_line" ]] && _pr_list+=("$_line")
-  done < <(gh pr list --repo "$_issue_repo" --state open --json number,title --jq '.[] | "\(.number)|\(.title)"')
+  done < <(gh pr list --repo "$_issue_repo" --state open --json number,title,closingIssuesReferences \
+    --jq '.[] | "\(.number)|\(.closingIssuesReferences | length)|\(.title)"')
+
+  # "N issues" tag for a _pr_list entry (number|issue count|title — title last so a
+  # '|' inside it survives 'cut -f3-'). Shows how loaded a PR is before you add to it.
+  _gai_pr_issue_tag() {
+    local _c
+    _c=$(echo "$1" | cut -d'|' -f2)
+    case "$_c" in
+      0) echo "no issues" ;;
+      1) echo "1 issue" ;;
+      *) echo "$_c issues" ;;
+    esac
+  }
 
   # ── question phase ──────────────────────────────────────────────────────────
   # Everything the run needs to know is asked here, in one block, before the
@@ -870,8 +893,8 @@ if [[ "${1:-}" == "issue" ]]; then
   _pr_title=""
   if [[ ${#_pr_list[@]} -eq 1 ]]; then
     _pr_num=$(echo "${_pr_list[0]}" | cut -d'|' -f1)
-    _pr_title=$(echo "${_pr_list[0]}" | cut -d'|' -f2)
-    echo "→ Auto-selecting PR #$_pr_num: $_pr_title"
+    _pr_title=$(echo "${_pr_list[0]}" | cut -d'|' -f3-)
+    echo "→ Auto-selecting PR #$_pr_num: $_pr_title [$(_gai_pr_issue_tag "${_pr_list[0]}")]"
   fi
 
   if [[ "$_tty" == "true" ]]; then
@@ -897,13 +920,13 @@ if [[ "${1:-}" == "issue" ]]; then
     _pr_options=()
     for _entry in "${_pr_list[@]}"; do
       _n=$(echo "$_entry" | cut -d'|' -f1)
-      _t=$(echo "$_entry" | cut -d'|' -f2)
-      _pr_options+=("#$_n: $_t")
+      _t=$(echo "$_entry" | cut -d'|' -f3-)
+      _pr_options+=("#$_n: $_t [$(_gai_pr_issue_tag "$_entry")]")
     done
     _gai_select_menu "${_pr_options[@]}"
     _idx=$_MENU_RESULT
     _pr_num=$(echo "${_pr_list[$_idx]}" | cut -d'|' -f1)
-    _pr_title=$(echo "${_pr_list[$_idx]}" | cut -d'|' -f2)
+    _pr_title=$(echo "${_pr_list[$_idx]}" | cut -d'|' -f3-)
   fi
 
   # Asked before the model runs, not after: waiting on a generation only to be
@@ -1465,7 +1488,7 @@ if [[ "${_gai_pr:-false}" == "true" ]]; then
   PR_BODY=""
   if [[ "$_pr_generate" == "true" ]]; then
     echo "→ Generating PR title…"
-    PR_TITLE=$(_gai_gen_pr_title "$CURRENT_BRANCH" "$PR_COMMITS") || true
+    PR_TITLE=$(_gai_gen_pr_title "$CURRENT_BRANCH" "$PR_COMMITS" "" "$PR_DIFF_STAT") || true
 
     echo "→ Generating PR body…"
     PR_BODY=$(_gai_gen_pr_body "$CURRENT_BRANCH" "$PR_COMMITS" "$PR_DIFF_STAT") || true
@@ -1490,23 +1513,41 @@ $PR_DIFF_STAT"
   git push -u origin "$CURRENT_BRANCH"
 
   echo "→ Creating PR…"
+  # Resolve the canonical repo from GitHub, not from the remote URL: a repo that
+  # was transferred (WebNaresh/x → Org/x) keeps working through a redirect, but
+  # gh then builds the head as 'OldOwner:branch' and GitHub rejects it with
+  # "Head repository can't be blank".
+  _pr_repo=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || true)
+  if [[ -z "$_pr_repo" ]]; then
+    echo "error: could not resolve the GitHub repo for this checkout (gh repo view failed)." >&2
+    exit 1
+  fi
+
   # A PR may already exist for this branch (common when re-running after
-  # 'gai issue'); surface its URL instead of failing.
+  # 'gai issue'); reuse it only while it is still OPEN. A merged or closed PR
+  # with the same head is history, not this PR.
+  _pr_verb="created"
   if ! PR_URL=$(gh pr create \
+    --repo "$_pr_repo" \
     --base "$BASE_BRANCH" \
+    --head "$CURRENT_BRANCH" \
     --assignee @me \
     --title "$PR_TITLE" \
     --body "$PR_BODY"); then
-    PR_URL=$(gh pr view --json url --jq '.url' 2>/dev/null || true)
-    if [[ -z "$PR_URL" ]]; then
-      echo "error: PR creation failed." >&2
+    _open_pr=$(gh pr list --repo "$_pr_repo" --head "$CURRENT_BRANCH" --base "$BASE_BRANCH" --state open \
+      --json number,url --jq '.[0] | select(. != null) | "\(.number) \(.url)"' 2>/dev/null || true)
+    if [[ -z "$_open_pr" ]]; then
+      echo "error: PR creation failed and no open PR exists for '$CURRENT_BRANCH' → '$BASE_BRANCH' in $_pr_repo." >&2
+      echo "  See the gh error above." >&2
       exit 1
     fi
-    echo "→ A PR already exists for '$CURRENT_BRANCH' — reusing it."
+    PR_URL="${_open_pr#* }"
+    _pr_verb="reused open PR #${_open_pr%% *}"
+    echo "→ An open PR already exists for '$CURRENT_BRANCH' — reusing it."
   fi
 
   echo ""
-  echo "✓ PR created: $PR_URL"
+  echo "✓ PR ${_pr_verb}: $PR_URL"
   echo "  Branch: $CURRENT_BRANCH → $BASE_BRANCH"
   echo "  Title:  $PR_TITLE"
   exit 0
