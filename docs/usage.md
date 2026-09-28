@@ -56,8 +56,11 @@ rather than failing; naming a base branch is rejected.
 **Empty-commit question** — only when nothing is ahead of the base. Counted
 against the branch you are *going* to be on, so an existing `dev` that already
 has commits is never asked about. That is the fast path to an empty PR you fill
-in later with `gai issue`. If a PR already exists for the branch, `gai pr` prints
-its URL instead of erroring.
+in later with `gai issue`. If an **open** PR already exists for the branch, `gai pr` reuses it and says so
+(`✓ PR reused open PR #N`); a merged or closed PR with the same head is never
+reused — the run fails with the real `gh` error instead. The repo is resolved with
+`gh repo view`, so a checkout whose remote still points at a transferred repo's old
+owner opens the PR in the right place.
 
 Piped or scripted (no TTY) it still errors rather than creating a branch or an
 empty commit behind your back — unless you answer ahead of time:
@@ -111,6 +114,10 @@ Only the questions your situation actually raises are asked — an issue going o
 the one open PR of a repo you are already on a branch in gets two, not four. If a
 PR has to be created, `gai pr`'s own two questions (branch name, empty commit)
 follow immediately, with no slow step in between.
+
+With several open PRs, the picker shows how many issues each one already closes
+(`#2114: feat(invoices): … [5 issues]`, `[no issues]`), read from GitHub's
+`closingIssuesReferences`, so you can see which PR is already carrying a lot of work.
 
 Answering yes to the rewrite **is** the approval. The old flow asked
 `Apply this title and body? [Y/n]` *after* the model finished, which is exactly
