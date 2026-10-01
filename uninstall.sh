@@ -12,7 +12,7 @@ echo ""
 
 # ── remove scripts ────────────────────────────────────────────────────────────
 
-for bin in gai gai-watch gai-db; do
+for bin in gai gai-watch gai-db gai-team; do
   if [[ -f "$INSTALL_DIR/$bin" ]]; then
     rm -f "$INSTALL_DIR/$bin"
     echo "✓ Removed $INSTALL_DIR/$bin"
