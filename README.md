@@ -101,6 +101,20 @@ Override a false positive with `gai --force`, `export GAI_ALLOW_PATHS='<glob>:<g
 or `allow=<glob>` lines in a repo-root `.gairc` (the only override `gai-watch`
 can see). Details: [docs/usage.md](docs/usage.md#what-gai-skips)
 
+### Team Claude setup (`gai team`)
+
+Share one Claude Code setup across a team: rules, skills, hooks, docs and project
+memory. Put it in a private `claude-config` repo in your GitHub org. Each teammate
+then only runs `gai update`. It's encrypted on GitHub (git-crypt), and nobody pastes
+a key: a teammate's laptop grants it automatically to repo collaborators.
+
+```bash
+gai team add <github-username>   # give someone access
+gai team                         # status
+```
+
+Details: [docs/team.md](docs/team.md)
+
 ---
 
 ## How it works
