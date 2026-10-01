@@ -54,6 +54,18 @@ syncing, `MEMORY.md` is merged on the decrypted text (both sides' lines kept). A
 other file pauses the sync without overwriting anything, and the next Claude session
 shows a notice telling you how to resolve it.
 
+## Org-wide bots that write into every repo
+
+Some orgs run a workflow that pushes the same files (often `.github/workflows/*`) into
+every repo. In a team repo, sync would encrypt those files, GitHub Actions couldn't read
+them, and the bot would push them back on every run.
+
+- `gai team init` keeps `.github/**` readable (`!filter !diff` in `.gitattributes`).
+- The encryption check follows `.gitattributes`. Anything marked readable on purpose
+  passes, while plain text in an encrypted path is still refused.
+- For another bot writing somewhere else, add its path to `.gitattributes` as `!filter !diff`,
+  or exclude the team repo in the bot's repo list. Never put secrets in a path marked readable.
+
 ## Limits
 
 - Write access to the repo means your code runs on every teammate's laptop (hooks). Only add people you trust.
