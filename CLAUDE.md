@@ -10,6 +10,7 @@
 |------|------|
 | `gai` | Main CLI: parse flags, call Ollama API, commit staged/all files one by one |
 | `gai-db` | `gai db copy/verify/unfreeze` — Postgres → Postgres copy with checks; see `docs/usage.md#copying-a-database` |
+| `gai-team` | `gai team` — shared, encrypted Claude Code setup (git-crypt + age); `gai update` runs `setup`; see `docs/team.md` |
 | `gai-watch` | Watcher: uses `fswatch` to detect `.git/index` changes, trigger `gai` |
 | `install.sh` | Installs deps (Homebrew, fswatch, ollama, model), copies scripts to `~/.local/bin`, patches `.zshrc` |
 | `uninstall.sh` | Removes installed scripts and `.zshrc` hook |
@@ -21,7 +22,7 @@
 
 ```bash
 # Lint (requires shellcheck)
-shellcheck -s bash gai gai-watch gai-db install.sh uninstall.sh
+shellcheck -s bash gai gai-watch gai-db gai-team install.sh uninstall.sh
 
 # Test manually
 gai --dry-run           # preview messages without committing

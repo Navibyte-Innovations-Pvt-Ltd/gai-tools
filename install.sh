@@ -135,6 +135,10 @@ echo "→ Installing gai-db to $INSTALL_DIR/gai-db…"
 cp "$SCRIPT_DIR/gai-db" "$INSTALL_DIR/gai-db"
 chmod +x "$INSTALL_DIR/gai-db"
 
+echo "→ Installing gai-team to $INSTALL_DIR/gai-team…"
+cp "$SCRIPT_DIR/gai-team" "$INSTALL_DIR/gai-team"
+chmod +x "$INSTALL_DIR/gai-team"
+
 # ── ensure ~/.local/bin is in PATH ───────────────────────────────────────────
 
 if ! grep -q 'HOME/.local/bin' "$ZSHRC" 2>/dev/null; then
@@ -294,6 +298,10 @@ fi
 
 mkdir -p "$HOME/.gai"
 echo "$VERSION" > "$HOME/.gai/version"
+
+# ── team Claude setup (only when your GitHub org has a 'claude-config' repo) ──
+# Silent for everyone else. Never fails the install.
+"$INSTALL_DIR/gai-team" setup --quiet || true
 
 echo ""
 echo "━━━ gai-tools v$VERSION installed ━━━"
