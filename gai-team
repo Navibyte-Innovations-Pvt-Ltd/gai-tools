@@ -29,7 +29,6 @@ KC_SVC="gai-team"
 NOTICE="$HOME/.claude/.claude-config-notice"
 CLAUDE_DIR="$HOME/.claude"
 LINK_DIRS="skills commands hooks scripts docs git-hooks agents"
-BOOTSTRAP_RE='^(\.gitattributes|\.gitignore|\.gai-team|README\.md|keys/.*)$'
 
 say()  { printf '%s\n' "$*"; }
 
@@ -443,7 +442,9 @@ pull_rebase() {
   return 1
 }
 
-# Every file about to be pushed must be ciphertext, except the bootstrap files.
+# Every file about to be pushed that .gitattributes marks for git-crypt must be
+# ciphertext. Files the repo deliberately keeps readable (README, keys/, org
+# workflow files) follow .gitattributes, not a hardcoded list.
 all_encrypted() {
   local f list
   if git rev-parse -q --verify "@{u}" > /dev/null; then
@@ -453,7 +454,7 @@ all_encrypted() {
   fi
   while IFS= read -r f; do
     [[ -n "$f" ]] || continue
-    [[ "$f" =~ $BOOTSTRAP_RE ]] && continue
+    [[ "$(git check-attr filter -- "$f" | sed 's/.*: //')" == git-crypt ]] || continue
     git cat-file -e "HEAD:$f" 2>/dev/null || continue
     [[ -L "$f" ]] && continue
     [[ "$(git cat-file -p "HEAD:$f" 2>/dev/null | head -c 9 | tr -d '\0')" == GITCRYPT ]] || return 1
@@ -697,7 +698,8 @@ cmd_init() {
   if ! grep -q 'filter=git-crypt' .gitattributes 2>/dev/null; then
     printf '%s\n' '* filter=git-crypt diff=git-crypt' \
       '.gitattributes !filter !diff' '.gitignore !filter !diff' \
-      'README.md !filter !diff' '.gai-team !filter !diff' 'keys/** !filter !diff' > .gitattributes
+      'README.md !filter !diff' '.gai-team !filter !diff' 'keys/** !filter !diff' \
+      '.github/** !filter !diff' > .gitattributes
   fi
   grep -q '^\.gai-team ' .gitattributes || printf '%s\n' '.gai-team !filter !diff' >> .gitattributes
   printf '%s\n' 'This repo is managed by gai team: https://github.com/Navibyte-Innovations-Pvt-Ltd/gai-tools/blob/main/docs/team.md' > .gai-team
