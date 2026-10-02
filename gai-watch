@@ -35,6 +35,10 @@ fi
 GIT_DIR=$(git rev-parse --git-dir)
 [[ "$GIT_DIR" != /* ]] && GIT_DIR="$PWD/$GIT_DIR"
 REPO_ROOT=$(git rev-parse --show-toplevel)
+# 'gai team' repos sync themselves; never auto-commit there (see gai).
+if [[ -f "$REPO_ROOT/.gai-team" ]]; then
+  exit 0
+fi
 REPO_HASH=$(echo "$REPO_ROOT" | md5)
 PID_FILE="/tmp/gai-watch-${REPO_HASH}.pid"
 # Touched on every shell visit (.zshrc hook) and every index change; its age is

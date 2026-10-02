@@ -1,0 +1,745 @@
+#!/usr/bin/env bash
+# gai-team — share one encrypted Claude Code setup across a team.
+#
+# The content lives in a private repo named `claude-config` in one of your GitHub
+# orgs (rules, skills, hooks, docs, project memory). Everything in it is encrypted
+# with git-crypt; gai only carries the machinery, never the content.
+#
+#   gai team             status
+#   gai team setup       find the team repo, clone, unlock, link into ~/.claude (run by `gai update`)
+#   gai team add <user>  give a GitHub user access (they then just run `gai update`)
+#   gai team remove <user>  take access away and rotate the team key
+#   gai team sync pull|push  used by Claude hooks: start of session / end of turn
+#   gai team init <owner/name>  publish ~/claude-config as a new encrypted team repo
+#
+# Nobody pastes a key. Each person gets a personal age key (~/.gai/team-identity).
+# A newcomer's `gai update` pushes keys/<login>.pub; the next sync on any unlocked
+# teammate's laptop wraps the team key for that public key (keys/<login>.age) — only
+# for real repo collaborators — and the newcomer's next sync unlocks itself.
+#
+# Docs: docs/team.md
+
+set -u
+
+TEAM_DIR="${GAI_TEAM_DIR:-$HOME/claude-config}"
+GAI_HOME="$HOME/.gai"
+CONF="$GAI_HOME/team"
+IDENT="$GAI_HOME/team-identity"
+KC_SVC="gai-team"
+NOTICE="$HOME/.claude/.claude-config-notice"
+CLAUDE_DIR="$HOME/.claude"
+LINK_DIRS="skills commands hooks scripts docs git-hooks agents"
+
+say()  { printf '%s\n' "$*"; }
+
+# Team-repo commits: no stamp hook (it would add session and issue titles) and a
+# terse message (no file names) — commit metadata is plaintext on GitHub.
+tcommit() { git -C "$TEAM_DIR" -c core.hooksPath=/dev/null commit -q -m "$1" > /dev/null 2>&1; }
+warn() { printf '⚠ %s\n' "$*" >&2; }
+notice() { mkdir -p "$CLAUDE_DIR"; printf '%s\n' "$*" >> "$NOTICE"; }
+# A person is at a terminal. Prompts go straight to /dev/tty, so they still work
+# inside $(…) and never land in captured output; Claude hooks have no tty.
+interactive() { [[ -t 0 ]] && { : > /dev/tty; } 2> /dev/null; }
+ask() { printf '%s' "$1" > /dev/tty; read -r REPLY < /dev/tty; }
+
+# Run a command with a time limit (macOS has no timeout(1)).
+limit() { local s=$1; shift; perl -e 'alarm shift; exec @ARGV' "$s" "$@"; }
+
+# ── repo discovery ───────────────────────────────────────────────────────────
+
+gh_ok() { command -v gh > /dev/null 2>&1 && gh auth status > /dev/null 2>&1; }
+
+my_login() {
+  local cache="$GAI_HOME/gh-login"
+  if [[ -s "$cache" ]]; then
+    cat "$cache"
+    return 0
+  fi
+  local l
+  l=$(gh api user -q .login 2>/dev/null) || return 1
+  [[ -n "$l" ]] || return 1
+  mkdir -p "$GAI_HOME"
+  printf '%s\n' "$l" > "$cache"
+  printf '%s\n' "$l"
+}
+
+# A repo is only ever adopted when it is a gai team repo (plaintext `.gai-team`
+# marker at its root) AND the user said yes once. gai is public: a stranger's own
+# dotfiles repo called claude-config must never be rewired into their ~/.claude.
+is_team_repo() {
+  gh api "repos/$1/contents/.gai-team" > /dev/null 2>&1
+}
+
+confirm_join() {  # $1 = owner/repo
+  interactive || return 1
+  ask "  Join the team Claude setup $1? It links its rules, skills and hooks into ~/.claude. [y/N] "
+  [[ "$REPLY" == y || "$REPLY" == Y ]]
+}
+
+team_repo() {
+  if [[ -n "${GAI_TEAM_REPO:-}" ]]; then
+    printf '%s\n' "$GAI_TEAM_REPO"
+    return 0
+  fi
+  if [[ -s "$CONF" ]]; then
+    head -1 "$CONF"
+    return 0
+  fi
+  [[ "${1:-}" == --discover ]] || return 1
+  gh_ok || return 1
+  local inv name cand found=""
+  # Pending invitations to a claude-config repo: accept only with a yes.
+  while IFS=$'\t' read -r inv name; do
+    [[ -n "$inv" ]] || continue
+    if interactive; then
+      ask "  You were invited to $name. Accept? [y/N] "
+      if [[ "$REPLY" == y || "$REPLY" == Y ]]; then
+        gh api -X PATCH "user/repository_invitations/$inv" > /dev/null 2>&1
+      fi
+    fi
+  done < <(gh api user/repository_invitations \
+    --jq '.[] | select(.repository.name=="claude-config") | "\(.id)\t\(.repository.full_name)"' 2>/dev/null)
+  for cand in $(gh api --paginate 'user/repos?per_page=100' \
+      --jq '.[] | select(.name=="claude-config") | .full_name' 2>/dev/null); do
+    if is_team_repo "$cand"; then
+      found="$cand"
+      break
+    fi
+  done
+  [[ -n "$found" ]] || return 1
+  confirm_join "$found" || return 1
+  mkdir -p "$GAI_HOME"
+  printf '%s\n' "$found" > "$CONF"
+  printf '%s\n' "$found"
+}
+
+need_tools() {
+  local missing="" t
+  for t in git-crypt age jq python3; do
+    command -v "$t" > /dev/null 2>&1 || missing="$missing $t"
+  done
+  [[ -z "$missing" ]] && return 0
+  if command -v brew > /dev/null 2>&1; then
+    say "→ Installing:$missing"
+    # shellcheck disable=SC2086
+    brew install $missing > /dev/null 2>&1 || { warn "brew install$missing failed"; return 1; }
+  else
+    warn "missing:$missing (install with Homebrew)"
+    return 1
+  fi
+}
+
+# ── keys ─────────────────────────────────────────────────────────────────────
+
+unlocked() { [[ -f "$TEAM_DIR/.git/git-crypt/keys/default" ]]; }
+
+kc_get() { security find-generic-password -s "$KC_SVC" -a "$1" -w 2>/dev/null; }
+kc_put() { security add-generic-password -U -s "$KC_SVC" -a "$1" -l "gai team $1" -w "$2" > /dev/null 2>&1; }
+
+# My personal age identity: ~/.gai/team-identity, mirrored in the Keychain.
+ensure_identity() {
+  if [[ -s "$IDENT" ]]; then
+    return 0
+  fi
+  mkdir -p "$GAI_HOME"
+  local saved
+  saved=$(kc_get identity) || saved=""
+  if [[ -n "$saved" ]]; then
+    printf '%s\n' "$saved" | base64 -d > "$IDENT"
+  else
+    age-keygen -o "$IDENT" > /dev/null 2>&1 || return 1
+    kc_put identity "$(base64 < "$IDENT" | tr -d '\n')"
+  fi
+  chmod 600 "$IDENT"
+}
+
+team_key_text() {
+  local tmp out
+  tmp=$(mktemp)
+  git -C "$TEAM_DIR" crypt export-key "$tmp" > /dev/null 2>&1
+  out=$(base64 < "$tmp" | tr -d '\n')
+  rm -f "$tmp"
+  printf '%s' "$out"
+}
+
+unlock_with_text() {
+  local tmp ok=1
+  tmp=$(mktemp)
+  printf '%s' "$1" | tr -d ' \n' | base64 -d > "$tmp" 2>/dev/null
+  if git -C "$TEAM_DIR" crypt unlock "$tmp" > /dev/null 2>&1; then ok=0; fi
+  rm -f "$tmp"
+  return $ok
+}
+
+unlock_with_file() { git -C "$TEAM_DIR" crypt unlock "$1" > /dev/null 2>&1; }
+
+remember_team_key() { kc_put team-key "$(team_key_text)"; }
+
+# Try every way to unlock without asking. 0 = unlocked.
+try_unlock() {
+  unlocked && return 0
+  local me text tmp
+  text=$(kc_get team-key) || text=""
+  if [[ -n "$text" ]] && unlock_with_text "$text"; then
+    return 0
+  fi
+  me=$(my_login 2>/dev/null) || me=""
+  if [[ -n "$me" && -f "$TEAM_DIR/keys/$me.age" ]] && ensure_identity; then
+    tmp=$(mktemp)
+    if age -d -i "$IDENT" -o "$tmp" "$TEAM_DIR/keys/$me.age" 2>/dev/null && unlock_with_file "$tmp"; then
+      rm -f "$tmp"
+      remember_team_key
+      return 0
+    fi
+    rm -f "$tmp"
+  fi
+  return 1
+}
+
+# Push keys/<me>.pub so an unlocked teammate's next sync grants the key.
+request_access() {
+  local me pub
+  me=$(my_login) || return 1
+  ensure_identity || return 1
+  pub=$(age-keygen -y "$IDENT")
+  mkdir -p "$TEAM_DIR/keys"
+  if [[ "$(cat "$TEAM_DIR/keys/$me.pub" 2>/dev/null)" == "$pub" ]]; then
+    return 0
+  fi
+  printf '%s\n' "$pub" > "$TEAM_DIR/keys/$me.pub"
+  git -C "$TEAM_DIR" add "keys/$me.pub"
+  tcommit "team: access request"
+  limit 20 git -C "$TEAM_DIR" push -q > /dev/null 2>&1
+}
+
+is_collaborator() {
+  gh api "repos/$(team_repo)/collaborators/$1" > /dev/null 2>&1
+}
+
+wrap_key_for() {  # $1 = login
+  local tmp
+  tmp=$(mktemp)
+  git -C "$TEAM_DIR" crypt export-key "$tmp" > /dev/null 2>&1
+  age -r "$(cat "$TEAM_DIR/keys/$1.pub")" -o "$TEAM_DIR/keys/$1.age" "$tmp"
+  local rc=$?
+  rm -f "$tmp"
+  return $rc
+}
+
+# Grant the team key to every collaborator who asked for it. Needs an unlocked repo.
+grant_pending() {
+  unlocked || return 0
+  [[ -d "$TEAM_DIR/keys" ]] || return 0
+  local pub user granted=""
+  for pub in "$TEAM_DIR"/keys/*.pub; do
+    [[ -f "$pub" ]] || continue
+    user=$(basename "$pub" .pub)
+    [[ -f "$TEAM_DIR/keys/$user.age" ]] && continue
+    if ! is_collaborator "$user"; then
+      continue
+    fi
+    if wrap_key_for "$user"; then
+      git -C "$TEAM_DIR" add "keys/$user.age"
+      granted="$granted $user"
+    fi
+  done
+  [[ -n "$granted" ]] || return 0
+  tcommit "team: key granted"
+  limit 20 git -C "$TEAM_DIR" push -q > /dev/null 2>&1
+  notice "gai team: gave the team key to$granted (they unlock on their next session)."
+  return 0
+}
+
+# ── linking into ~/.claude ───────────────────────────────────────────────────
+
+link_memory() {
+  local hs d key mem
+  hs=$(printf '%s' "$HOME" | sed 's/[^A-Za-z0-9]/-/g')
+  [[ -d "$TEAM_DIR/memory" ]] || return 0
+  # Adopt: a session here started memory for a project not shared yet.
+  for d in "$CLAUDE_DIR/projects/$hs-"*/memory; do
+    [[ -d "$d" && ! -L "$d" ]] || continue
+    key=${d#"$CLAUDE_DIR/projects/$hs-"}
+    key=${key%/memory}
+    case "$key" in github-runners-*) continue ;; esac
+    grep -qxF "$key" "$TEAM_DIR/memory-exclude.txt" 2>/dev/null && continue
+    [[ -n "$(ls -A "$d" 2>/dev/null)" ]] || continue
+    merge_memory "$d" "$TEAM_DIR/memory/$key"
+    mv "$d" "$d.pre-sync-$(date +%s)"
+    ln -s "$TEAM_DIR/memory/$key" "$d"
+  done
+  # Link: a teammate shared memory for a project this laptop has none for yet.
+  for mem in "$TEAM_DIR/memory/"*/; do
+    [[ -d "$mem" ]] || continue
+    key=$(basename "$mem")
+    d="$CLAUDE_DIR/projects/$hs-$key/memory"
+    if [[ ! -e "$d" ]]; then
+      mkdir -p "$(dirname "$d")"
+      ln -s "$TEAM_DIR/memory/$key" "$d"
+    fi
+  done
+}
+
+# New files copied, MEMORY.md lines unioned; never overwrites a shared file.
+merge_memory() {
+  local src=$1 dst=$2 f
+  mkdir -p "$dst"
+  for f in "$src"/*; do
+    [[ -f "$f" ]] || continue
+    if [[ "$(basename "$f")" == MEMORY.md && -f "$dst/MEMORY.md" ]]; then
+      local extra
+      extra=$(grep -vxF -f "$dst/MEMORY.md" "$f" 2>/dev/null)
+      [[ -n "$extra" ]] && printf '%s\n' "$extra" >> "$dst/MEMORY.md"
+    elif [[ ! -e "$dst/$(basename "$f")" ]]; then
+      cp -p "$f" "$dst/"
+    fi
+  done
+}
+
+link_all() {
+  local ts bk d src dst item name
+  ts=$(date +%Y%m%d-%H%M%S)
+  bk="$CLAUDE_DIR/pre-gai-team-$ts"
+  mkdir -p "$CLAUDE_DIR"
+  for d in $LINK_DIRS; do
+    src="$CLAUDE_DIR/$d"
+    dst="$TEAM_DIR/$d"
+    [[ -d "$dst" ]] || continue
+    if [[ -L "$src" && "$(readlink "$src")" == "$dst" ]]; then
+      continue
+    fi
+    if [[ -e "$src" ]]; then
+      mkdir -p "$bk"
+      # Your own entries join the shared repo; the shared copy wins a name clash.
+      for item in "$src"/* "$src"/.[!.]*; do
+        [[ -e "$item" || -L "$item" ]] || continue
+        name=$(basename "$item")
+        case "$name" in *.bak*|.DS_Store) continue ;; esac
+        if [[ ! -e "$dst/$name" && ! -L "$dst/$name" ]]; then
+          cp -R "$item" "$dst/"
+          say "  $d/$name: yours, now shared with the team"
+        fi
+      done
+      mv "$src" "$bk/$d"
+    fi
+    ln -s "$dst" "$src"
+    say "  ✓ ~/.claude/$d → team"
+  done
+  if [[ -f "$TEAM_DIR/CLAUDE.md" ]] && ! [[ -L "$CLAUDE_DIR/CLAUDE.md" && "$(readlink "$CLAUDE_DIR/CLAUDE.md")" == "$TEAM_DIR/CLAUDE.md" ]]; then
+    if [[ -f "$CLAUDE_DIR/CLAUDE.md" ]]; then
+      mkdir -p "$bk"
+      mv "$CLAUDE_DIR/CLAUDE.md" "$bk/CLAUDE.md"
+      say "  your old ~/.claude/CLAUDE.md is saved in $bk — move any rule you still want into ~/claude-config/CLAUDE.md"
+    fi
+    ln -s "$TEAM_DIR/CLAUDE.md" "$CLAUDE_DIR/CLAUDE.md"
+    say "  ✓ ~/.claude/CLAUDE.md → team"
+  fi
+  chmod +x "$TEAM_DIR"/hooks/*.sh "$TEAM_DIR"/scripts/* "$TEAM_DIR"/git-hooks/* 2> /dev/null
+  link_memory
+  merge_settings
+  if [[ -d "$TEAM_DIR/git-hooks" ]]; then
+    local cur
+    cur=$(git config --global --get core.hooksPath || true)
+    if [[ -z "$cur" || "$cur" == "$CLAUDE_DIR/git-hooks" ]]; then
+      git config --global core.hooksPath "$CLAUDE_DIR/git-hooks"
+    else
+      warn "git core.hooksPath is '$cur' — left alone, so commits aren't stamped"
+    fi
+  fi
+  if [[ -f "$TEAM_DIR/scripts/whose.py" ]]; then
+    mkdir -p "$HOME/.local/bin"
+    ln -sf "$CLAUDE_DIR/scripts/whose.py" "$HOME/.local/bin/whose"
+  fi
+  [[ -d "$bk" ]] && say "  (replaced files backed up in $bk)"
+  return 0
+}
+
+# Merge settings.shared.json (hooks, statusline, plugins) into ~/.claude/settings.json.
+# Personal keys (model, permissions, voice…) are never touched.
+merge_settings() {
+  local shared="$TEAM_DIR/settings.shared.json" local_s="$CLAUDE_DIR/settings.json"
+  [[ -f "$shared" ]] || return 0
+  [[ -f "$local_s" ]] || echo '{}' > "$local_s"
+  local stamp="$GAI_HOME/team-settings.sha"
+  local sum
+  sum=$(shasum "$shared" | cut -d' ' -f1)
+  [[ "$(cat "$stamp" 2>/dev/null)" == "$sum" ]] && return 0
+  cp -p "$local_s" "$local_s.bak-gai-team-$(date +%s)"
+  python3 - "$local_s" "$shared" << 'PY'
+import json, sys
+local_p, shared_p = sys.argv[1], sys.argv[2]
+local = json.load(open(local_p)); shared = json.load(open(shared_p))
+hooks = local.setdefault("hooks", {})
+for event, groups in shared.get("hooks", {}).items():
+    mine = hooks.setdefault(event, [])
+    have = {h.get("command") for g in mine for h in g.get("hooks", [])}
+    for g in groups:
+        new = [h for h in g.get("hooks", []) if h.get("command") not in have]
+        if new:
+            mine.append({**{k: v for k, v in g.items() if k != "hooks"}, "hooks": new})
+if shared.get("statusLine"):
+    local["statusLine"] = shared["statusLine"]
+for key in ("enabledPlugins", "extraKnownMarketplaces"):
+    for k, v in shared.get(key, {}).items():
+        local.setdefault(key, {}).setdefault(k, v)
+json.dump(local, open(local_p, "w"), indent=2)
+PY
+  mkdir -p "$GAI_HOME"
+  printf '%s\n' "$sum" > "$stamp"
+  say "  ✓ shared hooks merged into ~/.claude/settings.json"
+}
+
+# ── sync ─────────────────────────────────────────────────────────────────────
+
+LOCK_DIR() { printf '%s' "$TEAM_DIR/.git/gai-team.lock"; }
+take_lock() {
+  local l
+  l=$(LOCK_DIR)
+  if [[ -d "$l" && -n "$(find "$l" -maxdepth 0 -mmin +5 2>/dev/null)" ]]; then
+    rmdir "$l" 2>/dev/null
+  fi
+  mkdir "$l" 2>/dev/null
+}
+drop_lock() { rmdir "$(LOCK_DIR)" 2>/dev/null; }
+
+rebasing() { [[ -d "$TEAM_DIR/.git/rebase-merge" || -d "$TEAM_DIR/.git/rebase-apply" ]]; }
+
+stage_text() { git show ":$1:$2" 2>/dev/null | git-crypt smudge 2>/dev/null; }
+
+# Git can't merge ciphertext: union-merge MEMORY.md on the decrypted text, give up on anything else.
+resolve_rebase() {
+  local f a b conflicted
+  while rebasing; do
+    conflicted=$(git diff --name-only --diff-filter=U)
+    if [[ -z "$conflicted" ]]; then
+      if ! GIT_EDITOR=true git rebase --continue > /dev/null 2>&1; then
+        rebasing && return 1
+      fi
+      continue
+    fi
+    while IFS= read -r f; do
+      [[ "$(basename "$f")" == MEMORY.md ]] || return 1
+      a=$(stage_text 2 "$f")
+      b=$(stage_text 3 "$f")
+      {
+        [[ -n "$a" ]] && printf '%s\n' "$a"
+        printf '%s\n' "$b" | grep -vxF -f <(printf '%s\n' "$a")
+      } > "$f"
+      git add -- "$f"
+    done <<< "$conflicted"
+  done
+  return 0
+}
+
+pull_rebase() {
+  if limit "$1" git pull -q --rebase --autostash > /dev/null 2>&1; then
+    return 0
+  fi
+  rebasing || return 1   # offline / timeout: try next time
+  resolve_rebase && return 0
+  git rebase --abort > /dev/null 2>&1
+  notice "gai team: you and a teammate edited the same file — sync paused, nothing overwritten. Fix: cd ~/claude-config && git pull --rebase, keep the right version, git push."
+  return 1
+}
+
+# Every file about to be pushed that .gitattributes marks for git-crypt must be
+# ciphertext. Files the repo deliberately keeps readable (README, keys/, org
+# workflow files) follow .gitattributes, not a hardcoded list.
+all_encrypted() {
+  local f list
+  if git rev-parse -q --verify "@{u}" > /dev/null; then
+    list=$(git diff --name-only "@{u}" HEAD)
+  else
+    list=$(git ls-files)
+  fi
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    [[ "$(git check-attr filter -- "$f" | sed 's/.*: //')" == git-crypt ]] || continue
+    git cat-file -e "HEAD:$f" 2>/dev/null || continue
+    [[ -L "$f" ]] && continue
+    [[ "$(git cat-file -p "HEAD:$f" 2>/dev/null | head -c 9 | tr -d '\0')" == GITCRYPT ]] || return 1
+  done <<< "$list"
+  return 0
+}
+
+sync_pull() {
+  [[ -d "$TEAM_DIR/.git" ]] || return 0
+  cd "$TEAM_DIR" || return 0
+  take_lock || return 0
+  local before after
+  before=$(git rev-parse HEAD 2>/dev/null)
+  pull_rebase 10
+  if ! unlocked; then
+    if try_unlock; then
+      notice "gai team: unlocked — your Claude now uses the team setup. Restart open sessions."
+      link_all > /dev/null
+    fi
+  fi
+  if unlocked; then
+    after=$(git rev-parse HEAD 2>/dev/null)
+    if [[ "$before" != "$after" ]]; then
+      merge_settings > /dev/null
+    fi
+    link_memory
+  fi
+  drop_lock
+  if unlocked; then
+    # Grant + push can take longer than a SessionStart hook allows: background it.
+    nohup "$0" sync _grant < /dev/null > /dev/null 2>&1 &
+  fi
+  if [[ -s "$NOTICE" ]]; then
+    echo "⚠ gai team notice (tell the user, put it under ⚠ Your action):"
+    cat "$NOTICE"
+    rm -f "$NOTICE"
+  fi
+}
+
+sync_push_now() {
+  [[ -d "$TEAM_DIR/.git" ]] || return 0
+  cd "$TEAM_DIR" || return 0
+  unlocked || return 0
+  take_lock || return 0
+  link_memory
+  git add -A > /dev/null 2>&1
+  if ! git diff --cached --quiet; then
+    tcommit "sync"
+  fi
+  if [[ "$(git rev-list --count "@{u}..HEAD" 2>/dev/null || echo 1)" == 0 ]]; then
+    drop_lock
+    return 0
+  fi
+  if ! pull_rebase 20; then
+    drop_lock
+    return 0
+  fi
+  if ! all_encrypted; then
+    notice "gai team: REFUSED to push — a file would have reached GitHub unencrypted. Check: cd ~/claude-config && git-crypt status -e"
+    drop_lock
+    return 0
+  fi
+  limit 20 git push -q > /dev/null 2>&1
+  drop_lock
+}
+
+# ── key backup (first unlock on a laptop) ────────────────────────────────────
+
+offer_backup() {
+  local flag="$GAI_HOME/team-key-backed-up"
+  [[ -f "$flag" ]] && return 0
+  interactive || return 0
+  say ""
+  say "  Keep a copy of the team key in a password manager? (if every laptop is lost, it's the only way back in)"
+  say "    1) Apple Passwords   2) Google Password Manager   3) Both   4) Not now"
+  ask '  Choose 1-4: '
+  case "$REPLY" in
+    1) save_key_to "Apple Passwords" "open -a Passwords" ;;
+    2) save_key_to "Google Password Manager" "open https://passwords.google.com/" ;;
+    3) save_key_to "Apple Passwords" "open -a Passwords"
+       save_key_to "Google Password Manager" "open https://passwords.google.com/" ;;
+    *) return 0 ;;
+  esac
+  touch "$flag"
+}
+
+save_key_to() {  # $1 label, $2 opener
+  team_key_text | pbcopy
+  say "  $1: the key is on your clipboard. New password → Site: gai-team.local  User: team-key  Password: ⌘V → Save"
+  eval "$2" > /dev/null 2>&1
+  ask '  Press Enter once saved… '
+  printf '' | pbcopy
+}
+
+# ── commands ─────────────────────────────────────────────────────────────────
+
+cmd_setup() {
+  local repo
+  if ! gh_ok; then
+    [[ "${1:-}" == "--quiet" ]] || say "gai team: gh is not logged in (gh auth login) — skipped."
+    return 0
+  fi
+  repo=$(team_repo --discover) || {
+    [[ "${1:-}" == "--quiet" ]] || say "gai team: no team setup found (a 'claude-config' repo with a .gai-team marker) — nothing to do."
+    return 0
+  }
+  say ""
+  say "━━━ gai team: $repo ━━━"
+  need_tools || return 0
+  if [[ ! -d "$TEAM_DIR/.git" ]]; then
+    if [[ -e "$TEAM_DIR" ]]; then
+      warn "$TEAM_DIR exists but isn't a git repo — move it away and re-run gai update"
+      return 0
+    fi
+    gh repo clone "$repo" "$TEAM_DIR" -- -q > /dev/null 2>&1 || { warn "couldn't clone $repo"; return 0; }
+    say "  ✓ cloned to ~/claude-config"
+  else
+    (cd "$TEAM_DIR" && limit 15 git pull -q --rebase --autostash > /dev/null 2>&1) || true
+  fi
+  if try_unlock; then
+    say "  ✓ unlocked"
+  else
+    request_access
+    say "  … access requested. A teammate's Claude grants it automatically on their next"
+    say "    session; your next Claude session then unlocks itself. Nothing to type."
+    install_hooks_only
+    return 0
+  fi
+  remember_team_key
+  link_all
+  offer_backup
+  say "  Done. Restart open Claude sessions."
+}
+
+# Before unlocking, only the sync hooks are needed, so the next session can finish the job.
+install_hooks_only() {
+  local s="$CLAUDE_DIR/settings.json"
+  mkdir -p "$CLAUDE_DIR"
+  [[ -f "$s" ]] || echo '{}' > "$s"
+  python3 - "$s" << 'PY'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p)); h = d.setdefault("hooks", {})
+want = {"SessionStart": '"$HOME/.local/bin/gai-team" sync pull',
+        "Stop": '"$HOME/.local/bin/gai-team" sync push'}
+for ev, cmd in want.items():
+    groups = h.setdefault(ev, [])
+    if not any(x.get("command") == cmd for g in groups for x in g.get("hooks", [])):
+        groups.append({"hooks": [{"type": "command", "command": cmd, "timeout": 20}]})
+json.dump(d, open(p, "w"), indent=2)
+PY
+}
+
+cmd_status() {
+  local repo me
+  repo=$(cat "$CONF" 2>/dev/null) || repo=""
+  if [[ -z "$repo" ]]; then
+    say "Not in a team. 'gai update' sets it up once a 'claude-config' repo exists in your org."
+    return 0
+  fi
+  me=$(my_login 2>/dev/null) || me="?"
+  say "Team repo : $repo  (~/claude-config)"
+  if unlocked; then say "Unlocked  : yes"; else say "Unlocked  : no (waiting for a teammate to grant the key)"; fi
+  if [[ -d "$TEAM_DIR/keys" ]]; then
+    local f u
+    say "Members   :"
+    for f in "$TEAM_DIR"/keys/*.pub; do
+      [[ -f "$f" ]] || continue
+      u=$(basename "$f" .pub)
+      if [[ -f "$TEAM_DIR/keys/$u.age" ]]; then say "  ✓ $u"; else say "  … $u (asked for access)"; fi
+    done
+  fi
+  [[ "$me" != "?" ]] && say "You       : $me"
+}
+
+cmd_add() {
+  local user=${1:-} repo
+  [[ -n "$user" ]] || { say "usage: gai team add <github-username>"; return 1; }
+  repo=$(team_repo) || { say "Not in a team."; return 1; }
+  if gh api -X PUT "repos/$repo/collaborators/$user" -f permission=push > /dev/null 2>&1; then
+    say "✓ $user can now access $repo."
+    say "  They run: gai update   (the key reaches them automatically — nothing to send)"
+  else
+    say "Couldn't add $user — check the username and that you're an admin of $repo."
+    return 1
+  fi
+}
+
+cmd_remove() {
+  local user=${1:-} repo
+  [[ -n "$user" ]] || { say "usage: gai team remove <github-username>"; return 1; }
+  repo=$(team_repo) || { say "Not in a team."; return 1; }
+  unlocked || { say "Unlock first (gai update)."; return 1; }
+  gh api -X DELETE "repos/$repo/collaborators/$user" > /dev/null 2>&1
+  cd "$TEAM_DIR" || return 1
+  git rm -q -f --ignore-unmatch "keys/$user.pub" "keys/$user.age"
+  rotate_key
+  say "✓ $user removed and the team key rotated. They keep whatever they already pulled; new changes are closed to them."
+}
+
+# New team key: re-encrypt every file, re-grant everyone still listed.
+rotate_key() {
+  cd "$TEAM_DIR" || return 1
+  pull_rebase 20 || { say "Sync first — conflicts pending."; return 1; }
+  rm -rf .git/git-crypt
+  git-crypt init > /dev/null 2>&1
+  git rm -r -q --cached .
+  git add -A
+  rm -f keys/*.age
+  local pub u
+  for pub in keys/*.pub; do
+    [[ -f "$pub" ]] || continue
+    u=$(basename "$pub" .pub)
+    wrap_key_for "$u"
+  done
+  git add -A
+  tcommit "team: key rotated"
+  if all_encrypted; then
+    limit 30 git push -q > /dev/null 2>&1
+  else
+    warn "not pushed: some file is not encrypted"
+  fi
+  remember_team_key
+}
+
+cmd_init() {
+  local repo=${1:-} me
+  [[ "$repo" == */* ]] || { say "usage: gai team init <owner>/claude-config"; return 1; }
+  need_tools || return 1
+  [[ -d "$TEAM_DIR" ]] || { say "Put the content in ~/claude-config first."; return 1; }
+  if gh repo view "$repo" --json name > /dev/null 2>&1; then
+    say "$repo already exists on GitHub. Delete it first (its history may be unencrypted), or pick another name."
+    return 1
+  fi
+  cd "$TEAM_DIR" || return 1
+  if [[ ! -d .git ]]; then
+    git init -q -b main
+  fi
+  if [[ ! -f .git/git-crypt/keys/default ]]; then
+    git-crypt init > /dev/null 2>&1
+  fi
+  if ! grep -q 'filter=git-crypt' .gitattributes 2>/dev/null; then
+    printf '%s\n' '* filter=git-crypt diff=git-crypt' \
+      '.gitattributes !filter !diff' '.gitignore !filter !diff' \
+      'README.md !filter !diff' '.gai-team !filter !diff' 'keys/** !filter !diff' \
+      '.github/** !filter !diff' > .gitattributes
+  fi
+  grep -q '^\.gai-team ' .gitattributes || printf '%s\n' '.gai-team !filter !diff' >> .gitattributes
+  printf '%s\n' 'This repo is managed by gai team: https://github.com/Navibyte-Innovations-Pvt-Ltd/gai-tools/blob/main/docs/team.md' > .gai-team
+  me=$(my_login) || return 1
+  ensure_identity
+  mkdir -p keys
+  age-keygen -y "$IDENT" > "keys/$me.pub"
+  wrap_key_for "$me"
+  git add -A
+  tcommit "team: initial setup"
+  if ! all_encrypted; then
+    say "STOP: some file isn't encrypted — nothing was published."
+    return 1
+  fi
+  gh repo create "$repo" --private --description "Team Claude Code setup (encrypted, managed by gai team)" > /dev/null || return 1
+  git remote remove origin 2> /dev/null
+  git remote add origin "https://github.com/$repo.git"
+  git push -q -u origin main || return 1
+  mkdir -p "$GAI_HOME"
+  printf '%s\n' "$repo" > "$CONF"
+  remember_team_key
+  say "✓ Published $repo (private, encrypted). Add teammates: gai team add <github-username>"
+}
+
+case "${1:-status}" in
+  setup)  shift; cmd_setup "$@" ;;
+  status) cmd_status ;;
+  add)    shift; cmd_add "$@" ;;
+  remove) shift; cmd_remove "$@" ;;
+  init)   shift; cmd_init "$@" ;;
+  sync)
+    case "${2:-}" in
+      pull) sync_pull ;;
+      push) nohup "$0" sync _push < /dev/null > /dev/null 2>&1 & ;;
+      _push) sync_push_now ;;
+      _grant) cd "$TEAM_DIR" && take_lock && { grant_pending; drop_lock; } ;;
+      *) say "usage: gai team sync pull|push"; exit 1 ;;
+    esac
+    ;;
+  -h|--help|help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) say "unknown: gai team $1 — see gai team --help"; exit 1 ;;
+esac
+exit 0

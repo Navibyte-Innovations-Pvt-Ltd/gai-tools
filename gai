@@ -755,6 +755,20 @@ if [[ "${1:-}" == "db" ]]; then
   exec "$_gai_db" "$@"
 fi
 
+# 'gai team …' shares one encrypted Claude Code setup across a team — its own script.
+if [[ "${1:-}" == "team" ]]; then
+  shift
+  _gai_team="$(dirname "$0")/gai-team"
+  if [[ ! -x "$_gai_team" ]]; then
+    _gai_team=$(command -v gai-team || true)
+  fi
+  if [[ -z "$_gai_team" ]]; then
+    echo "gai-team is not installed — run: gai update" >&2
+    exit 1
+  fi
+  exec "$_gai_team" "$@"
+fi
+
 if [[ "${1:-}" == "issue" ]]; then
   _issue_args=""
   _issue_dry_run=false
@@ -1352,7 +1366,7 @@ for arg in "$@"; do
       exit 0
       ;;
     remove|uninstall)
-      echo "This will remove gai/gai-watch/gai-db, stop all watchers, and remove the ~/.zshrc hook."
+      echo "This will remove gai/gai-watch/gai-db/gai-team, stop all watchers, and remove the ~/.zshrc hook."
       read -rp "Continue? [y/N] " _confirm || true
       if [[ "$_confirm" != "y" && "$_confirm" != "Y" ]]; then
         echo "Aborted."
@@ -1367,7 +1381,7 @@ for arg in "$@"; do
         echo "✓ Removed hook from ~/.zshrc"
       fi
 
-      rm -f "$HOME/.local/bin/gai" "$HOME/.local/bin/gai-watch" "$HOME/.local/bin/gai-db"
+      rm -f "$HOME/.local/bin/gai" "$HOME/.local/bin/gai-watch" "$HOME/.local/bin/gai-db" "$HOME/.local/bin/gai-team"
       echo "✓ Removed gai and gai-watch from ~/.local/bin"
 
       echo ""
@@ -1377,7 +1391,7 @@ for arg in "$@"; do
       exit 0
       ;;
     --help|-h)
-      echo "Usage: gai [--all] [--dry-run] [--force] [--version] [--logs] [update] [pr] [issue <n|url>] [db <copy|verify|unfreeze>] [pause] [resume] [status] [remove]"
+      echo "Usage: gai [--all] [--dry-run] [--force] [--version] [--logs] [update] [pr] [issue <n|url>] [db <copy|verify|unfreeze>] [team] [pause] [resume] [status] [remove]"
       echo "  Default      : commit staged files one by one (AI message per file)"
       echo "  --all        : commit all dirty files instead of staged"
       echo "  --dry-run    : show messages without committing"
@@ -1401,10 +1415,13 @@ for arg in "$@"; do
       echo "  db copy      : copy one Postgres database into another — asks for the new URL,"
       echo "                 then the old one; optional freeze, all-or-nothing restore, row-count"
       echo "                 check of every table. Also: db verify, db unfreeze. gai db --help"
+      echo "  team         : shared, encrypted Claude Code setup for your team (rules, skills,"
+      echo "                 hooks, memory). 'gai update' sets it up when your GitHub org has a"
+      echo "                 'claude-config' repo. Also: team add/remove <user>, team status"
       echo "  pause        : stop auto-commit (gai pr / gai issue keep working)"
       echo "  resume       : re-enable auto-commit after 'gai pause'"
       echo "  status       : list running watchers, their repos and when each was last used"
-      echo "  remove       : uninstall gai/gai-watch/gai-db (alias: uninstall)"
+      echo "  remove       : uninstall gai/gai-watch/gai-db/gai-team (alias: uninstall)"
       echo ""
       echo "Model: \$GAI_MODEL (default: $MODEL)"
       echo "Secret allowlist: \$GAI_ALLOW_PATHS (colon-separated globs) or 'allow=<glob>' lines in <repo>/.gairc"
@@ -1656,6 +1673,13 @@ GIT_DIR=$(git rev-parse --git-dir 2>/dev/null)
 GIT_TOPLEVEL=$(git rev-parse --show-toplevel 2>/dev/null || true)
 if [[ -n "$GIT_TOPLEVEL" ]]; then
   cd "$GIT_TOPLEVEL" || exit 1
+fi
+
+# A 'gai team' repo commits itself. AI messages here would be written from the
+# decrypted diff and published as plaintext beside the ciphertext, so stay out.
+if [[ -f "$GIT_TOPLEVEL/.gai-team" ]]; then
+  echo "gai: skipping $GIT_TOPLEVEL — a 'gai team' repo syncs itself." >&2
+  exit 0
 fi
 
 if [[ -f "$GIT_DIR/MERGE_HEAD" ]] || git status --short | grep -qE '^(UU|AA|DD|AU|UA|UD|DU) '; then
