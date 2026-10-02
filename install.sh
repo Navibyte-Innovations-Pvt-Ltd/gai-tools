@@ -230,7 +230,9 @@ while IFS= read -r pidfile; do
   RESTARTED=$((RESTARTED + 1))
   echo "  ✓ $(basename "$repo")"
 
-done < <(find /tmp -maxdepth 1 -name 'gai-watch-*.pid' 2>/dev/null)
+# /tmp/, not /tmp: on macOS /tmp is a symlink and find does not follow it, so
+# this loop found nothing and old watchers (issue #56's) were never restarted.
+done < <(find /tmp/ -maxdepth 1 -name 'gai-watch-*.pid' 2>/dev/null)
 
 if [[ $RESTARTED -eq 0 ]]; then
   echo "  (no prior watchers found)"
