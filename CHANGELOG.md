@@ -9,6 +9,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) — [Semantic V
 ## [Unreleased]
 ### Added
 
+- fix(gai-watch): watchers no longer start in every repo a shell visits (#56).
+  CI runner checkouts, temp dirs and git worktrees are skipped, plus anything
+  ruled out by `GAI_WATCH_DISABLE=1`, `watch=off` in `.gairc` or `~/.gai/watch`
+  (`only=` / `skip=` / `allow=`). Watchers start detached, so `exit` closes the
+  shell the first time. Each one stops after `GAI_WATCH_IDLE_HOURS` (24) unused,
+  at most `GAI_WATCH_MAX` (10) run at once, and `gai status` lists them.
+
 - feat(gai-db): `gai db copy` copies one Postgres database into another for any
   project. Asks for the new URL, then the old one (hidden, never printed), checks
   server versions and extensions, optionally freezes the old database, wipes a
