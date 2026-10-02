@@ -489,10 +489,42 @@ _gai_verify_linked() {
     fi
     sleep 1
   done
+  # GitHub read the Closes line and still linked nothing (it stopped doing so
+  # for every repo on 2026-09-30). Make the link ourselves — the same one the
+  # Development box on the PR page makes — rather than send the user there.
+  _gai_close_refs add "$_missing"
+  _linked=$(gh pr view "$_pr_num" --repo "$_issue_repo" --json closingIssuesReferences \
+    --jq '.closingIssuesReferences[].number' 2> /dev/null || true)
+  _missing=$(printf '%s\n' "$_issue_nums" | grep -vFx "${_linked:-_}" || true)
+  if [[ -z "$_missing" ]]; then
+    echo "✓ Linked ${_issue_label} to PR #${_pr_num} directly — GitHub did not pick up the Closes line"
+    return 0
+  fi
   _missing=$(echo "$_missing" | sed 's/^/#/' | tr '\n' ' ' | sed 's/ *$//')
   echo "⚠ GitHub is not linking ${_missing} to PR #${_pr_num}, though the Closes line is in the body."
   echo "  It links only when the PR targets the default branch and the line is not inside"
   echo "  a code block or HTML comment. Open the PR and check how the description renders."
+  return 0
+}
+
+# Link ("add") or unlink ("remove") issues on the PR by hand, the way its
+# Development box does. $2 is one issue number per line. Best effort: a failure
+# is left for the caller's own check to report.
+_gai_close_refs() {
+  local _op="$1" _nums="$2" _n _pr_id _issue_id
+  _pr_id=$(gh pr view "$_pr_num" --repo "$_issue_repo" --json id --jq '.id' 2> /dev/null || true)
+  if [[ -z "$_pr_id" ]]; then
+    return 0
+  fi
+  for _n in $_nums; do
+    _issue_id=$(gh issue view "$_n" --repo "$_issue_repo" --json id --jq '.id' 2> /dev/null || true)
+    if [[ -z "$_issue_id" ]]; then
+      continue
+    fi
+    gh api graphql \
+      -f query="mutation(\$i:ID!,\$p:[ID!]!){${_op}CloseIssueReferences(input:{issueId:\$i,pullRequestIds:\$p}){clientMutationId}}" \
+      -f i="$_issue_id" -f "p[]=$_pr_id" > /dev/null 2>&1 || true
+  done
   return 0
 }
 
@@ -585,6 +617,8 @@ ${_closes_block}"
 
   if [[ "$_phase" == "attach" ]]; then
     if [[ "$_issue_remove" == "true" ]]; then
+      # A link gai made directly outlives the Closes line, so drop that too.
+      _gai_close_refs remove "$_issue_nums"
       echo "✓ Removed ${_issue_label} from PR #${_pr_num} — still closes: ${_nums_pretty:-none}"
     else
       echo "✓ Attached ${_issue_label} to PR #${_pr_num} — closes: $_nums_pretty"
@@ -829,11 +863,15 @@ if [[ "${1:-}" == "issue" ]]; then
 
   echo "→ Fetching open PRs for ${_issue_repo}…"
 
+  # PRs opened by bots (the GitHub Claude app's own fix PRs, dependabot…) are
+  # never where your issues go: one was auto-picked for having the most
+  # issues and 14 issues landed on a bot's single-fix PR. Only human PRs.
   _pr_list=()
   while IFS= read -r _line; do
     [[ -n "$_line" ]] && _pr_list+=("$_line")
-  done < <(gh pr list --repo "$_issue_repo" --state open --json number,title,closingIssuesReferences \
-    --jq '.[] | "\(.number)|\(.closingIssuesReferences | length)|\(.title)"')
+  done < <(gh pr list --repo "$_issue_repo" --state open --json number,title,closingIssuesReferences,author \
+    --jq '.[] | select(((.author.is_bot // false) or (.author.login | startswith("app/")) or (.author.login | endswith("[bot]"))) | not)
+      | "\(.number)|\(.closingIssuesReferences | length)|\(.title)"')
 
   # "N issues" tag for a _pr_list entry (number|issue count|title — title last so a
   # '|' inside it survives 'cut -f3-'). Shows how loaded a PR is before you add to it.
@@ -1293,6 +1331,40 @@ for arg in "$@"; do
       echo "▶  Auto-commit resumed."
       exit 0
       ;;
+    status)
+      # Every running watcher with its repo and when that repo was last used, so
+      # a pile-up like issue #56's (48 processes, CI checkouts) is visible at once.
+      if [[ -f "$HOME/.gai/paused" ]]; then
+        echo "⏸  Auto-commit paused (gai resume to re-enable)."
+      fi
+      _now=$(date +%s)
+      _count=0
+      for _pf in /tmp/gai-watch-*.pid; do
+        [[ -f "$_pf" ]] || continue
+        _pid=$(awk '{print $1}' "$_pf" 2>/dev/null)
+        _repo=$(awk '{print $2}' "$_pf" 2>/dev/null)
+        if [[ -z "$_pid" ]] || ! kill -0 "$_pid" 2>/dev/null ||
+           ! ps -p "$_pid" -o command= 2>/dev/null | grep -q gai-watch; then
+          continue
+        fi
+        _seen=$(stat -f %m "/tmp/gai-watch-seen-$(echo "$_repo" | md5)" 2>/dev/null || echo "")
+        if [[ -n "$_seen" ]]; then
+          _ago=$(( (_now - _seen) / 60 ))
+          if (( _ago < 60 )); then
+            _ago="${_ago}m ago"
+          else
+            _ago="$(( _ago / 60 ))h ago"
+          fi
+        else
+          _ago="unknown"
+        fi
+        printf '  %-7s %-10s %s\n' "$_pid" "$_ago" "${_repo/#$HOME/~}"
+        _count=$((_count + 1))
+      done
+      echo "$_count watcher(s) running (cap ${GAI_WATCH_MAX:-10}, idle stop after ${GAI_WATCH_IDLE_HOURS:-24}h)."
+      echo "Stop one: kill <pid>   |   which repos are watched: docs/usage.md#which-repos-are-watched"
+      exit 0
+      ;;
     remove|uninstall)
       echo "This will remove gai/gai-watch/gai-db/gai-team, stop all watchers, and remove the ~/.zshrc hook."
       read -rp "Continue? [y/N] " _confirm || true
@@ -1302,7 +1374,7 @@ for arg in "$@"; do
       fi
 
       pkill -f gai-watch 2>/dev/null || true
-      rm -f /tmp/gai-watch-*.pid
+      rm -f /tmp/gai-watch-*.pid /tmp/gai-watch-seen-*
 
       if grep -q "gai-tools:" "$HOME/.zshrc" 2>/dev/null; then
         sed -i '' '/# gai-tools: auto-start/,/# end gai-tools/d' "$HOME/.zshrc"
@@ -1319,7 +1391,7 @@ for arg in "$@"; do
       exit 0
       ;;
     --help|-h)
-      echo "Usage: gai [--all] [--dry-run] [--force] [--version] [--logs] [update] [pr] [issue <n|url>] [db <copy|verify|unfreeze>] [team] [pause] [resume] [remove]"
+      echo "Usage: gai [--all] [--dry-run] [--force] [--version] [--logs] [update] [pr] [issue <n|url>] [db <copy|verify|unfreeze>] [team] [pause] [resume] [status] [remove]"
       echo "  Default      : commit staged files one by one (AI message per file)"
       echo "  --all        : commit all dirty files instead of staged"
       echo "  --dry-run    : show messages without committing"
@@ -1348,6 +1420,7 @@ for arg in "$@"; do
       echo "                 'claude-config' repo. Also: team add/remove <user>, team status"
       echo "  pause        : stop auto-commit (gai pr / gai issue keep working)"
       echo "  resume       : re-enable auto-commit after 'gai pause'"
+      echo "  status       : list running watchers, their repos and when each was last used"
       echo "  remove       : uninstall gai/gai-watch/gai-db/gai-team (alias: uninstall)"
       echo ""
       echo "Model: \$GAI_MODEL (default: $MODEL)"

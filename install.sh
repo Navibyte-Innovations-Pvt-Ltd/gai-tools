@@ -22,8 +22,11 @@ _gai_pidfile() {
 }
 
 _gai_watch_start() {
+  [[ "${GAI_WATCH_DISABLE:-}" == 1 ]] && return
   local repo
   repo=$(git rev-parse --show-toplevel 2>/dev/null) || return
+  # Mark the visit: a watcher stops itself after GAI_WATCH_IDLE_HOURS without one.
+  _gai_watch_seen "$repo"
   local pidfile
   pidfile=$(_gai_pidfile "$repo")
   if [[ -f "$pidfile" ]]; then
@@ -39,8 +42,17 @@ _gai_watch_start() {
   fi
   local repo_hash
   repo_hash=$(echo "$repo" | md5)
-  gai-watch > "/tmp/gai-watch-${repo_hash}.log" 2>&1 &
+  # &! detaches the watcher, so it is not a job of this shell and `exit` closes
+  # the shell the first time. gai-watch decides for itself whether this repo is
+  # one to watch (CI checkouts, temp dirs, worktrees and ~/.gai/watch rules are
+  # skipped — issue #56) and removes this pidfile when it is not. Writing it here
+  # straight away stops several shells opening at once from each starting one.
+  gai-watch > "/tmp/gai-watch-${repo_hash}.log" 2>&1 &!
   echo "$! $repo" > "$pidfile"
+}
+
+_gai_watch_seen() {
+  touch "/tmp/gai-watch-seen-$(echo "$1" | md5)" 2>/dev/null
 }
 
 # add-zsh-hook, not a bare chpwd() — a bare definition clobbers any chpwd the
@@ -154,7 +166,7 @@ fi
 # install that its block is out of date. Without it, upgrades silently keep the
 # old hook (e.g. the bare chpwd() that clobbered user hooks and errored in
 # non-interactive shells).
-HOOK_MARKER="_gai_chpwd_hook"
+HOOK_MARKER="_gai_watch_seen"
 
 if grep -q "gai-tools:" "$ZSHRC" 2>/dev/null; then
   if ! grep -q "$HOOK_MARKER" "$ZSHRC" 2>/dev/null; then

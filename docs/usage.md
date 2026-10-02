@@ -22,7 +22,42 @@ gai issue 123,456        # several issues (same bug filed twice): one PR, one Cl
 gai db           # menu: copy / verify / unfreeze a Postgres database
 gai-watch        # start watcher manually
 gai-watch --dry-run  # watch + preview only
+gai status       # list running watchers and when each repo was last used
 ```
+
+## Which Repos Are Watched
+
+The `~/.zshrc` hook offers a watcher to every git repo a shell enters, and
+`gai-watch` decides at startup whether to take it. It prints the reason and exits
+when the repo is one it should leave alone:
+
+| Skipped | Why |
+|---------|-----|
+| `GAI_WATCH_DISABLE=1`, or `$CI` / `$GITHUB_ACTIONS` set | opt-out; CI shells |
+| `watch=off` in the repo's `.gairc` | per-repo opt-out |
+| paths under `*/_work/*`, `*/actions-runner/*`, `*/github-runners/*`, `$RUNNER_WORKSPACE` | CI runner checkouts belong to CI, which rebuilds in them all day |
+| `/tmp`, `/private/tmp`, `/var/folders`, `$TMPDIR` | throwaway clones |
+| git worktrees | short-lived checkouts beside the main repo |
+
+Rules of your own go in `~/.gai/watch`, one per line (read line by line, never
+sourced; `~/` means your home):
+
+```
+only=~/coding-line/*     # watch nothing outside these paths
+skip=~/old-projects/*    # never watch these
+allow=~/coding-line/gai-tools/.claude/worktrees/*   # watch despite a built-in rule
+```
+
+`allow=` overrides the built-in rows of the table, not `skip=`, `only=` or the
+opt-outs.
+
+**Watchers clean up after themselves.** The hook starts each watcher detached
+from the shell, so `exit` works the first time. Each one stops itself once its
+repo goes `GAI_WATCH_IDLE_HOURS` (default 24, `0` = never) with no shell
+entering it and no index change; the next `cd` into the repo starts a fresh one.
+At most `GAI_WATCH_MAX` (default 10, `0` = no cap) run at once. Starting one
+more stops the watcher whose repo was used least recently. `gai status` lists
+what is running.
 
 ## Opening a PR
 
@@ -169,6 +204,13 @@ Then it executes, in order:
    whether the issue is really linked: `✓ GitHub links #N to PR #M`, or a `⚠`
    saying why it may not be (a code block, or a PR not aimed at the default
    branch).
+
+   **If GitHub still links nothing, gai links the issue itself.** On 2026-09-30
+   GitHub stopped turning `Closes #N` into a linked issue, in every repo, with a
+   correct body on the default branch. When the check above comes back empty,
+   gai makes the same link the PR's Development box makes and prints
+   `✓ Linked #N to PR #M directly`. `gai issue N --remove` drops that link again
+   along with the `Closes` line.
 
    **Attached the wrong issue?** `gai issue 34 --remove` (or `-r`) is the undo.
    It drops `#34` from the closing block, keeps every other issue, and rewrites

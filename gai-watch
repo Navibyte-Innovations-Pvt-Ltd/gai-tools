@@ -41,6 +41,101 @@ if [[ -f "$REPO_ROOT/.gai-team" ]]; then
 fi
 REPO_HASH=$(echo "$REPO_ROOT" | md5)
 PID_FILE="/tmp/gai-watch-${REPO_HASH}.pid"
+# Touched on every shell visit (.zshrc hook) and every index change; its age is
+# what the idle stop below measures.
+SEEN_FILE="/tmp/gai-watch-seen-${REPO_HASH}"
+WATCH_CONF="$HOME/.gai/watch"
+
+# Lines of `key=value` from a file, comments and blanks dropped. Read line by
+# line — NEVER sourced, same as .gairc in gai.
+_conf_lines() {
+  local key="$1" file="$2" line
+  [[ -f "$file" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%%#*}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    case "$line" in
+      "$key="*) echo "${line#"$key="}" ;;
+    esac
+  done < "$file"
+}
+
+# Does $REPO_ROOT match any glob read from stdin? A leading ~/ means $HOME.
+_repo_matches() {
+  local g
+  while IFS= read -r g; do
+    [[ -z "$g" ]] && continue
+    # shellcheck disable=SC2088 # a literal ~/ in the config, expanded by hand
+    if [[ "${g:0:2}" == '~/' ]]; then
+      g="$HOME/${g:2}"
+    fi
+    # shellcheck disable=SC2053
+    if [[ "$REPO_ROOT" == $g || "$REPO_ROOT" == "${g%/}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Why this repo must not be watched, or nothing. The .zshrc hook starts a watcher
+# in every repo a shell enters (issue #56): CI runner checkouts that CI owns,
+# throwaway temp clones and worktrees all piled up, and fseventsd with them.
+_skip_reason() {
+  if [[ "${GAI_WATCH_DISABLE:-}" == "1" ]]; then
+    echo "GAI_WATCH_DISABLE=1"; return
+  fi
+  if [[ -n "${CI:-}" || -n "${GITHUB_ACTIONS:-}" ]]; then
+    echo "running under CI"; return
+  fi
+  if [[ "$(_conf_lines watch "$REPO_ROOT/.gairc" | tail -1)" == "off" ]]; then
+    echo "watch=off in .gairc"; return
+  fi
+  if _conf_lines skip "$WATCH_CONF" | _repo_matches; then
+    echo "skip= in ~/.gai/watch"; return
+  fi
+  if [[ -n "$(_conf_lines only "$WATCH_CONF")" ]] && ! _conf_lines only "$WATCH_CONF" | _repo_matches; then
+    echo "not under an only= path in ~/.gai/watch"; return
+  fi
+  # allow= overrides the built-in rules below, nothing above.
+  if _conf_lines allow "$WATCH_CONF" | _repo_matches; then
+    return
+  fi
+  case "$REPO_ROOT" in
+    */_work/*|*/actions-runner/*|*/github-runners/*)
+      echo "CI runner checkout"; return ;;
+    /tmp/*|/private/tmp/*|/var/folders/*|/private/var/folders/*)
+      echo "temp directory"; return ;;
+  esac
+  if [[ -n "${RUNNER_WORKSPACE:-}" && "$REPO_ROOT" == "${RUNNER_WORKSPACE%/}"/* ]]; then
+    echo "CI runner checkout"; return
+  fi
+  if [[ -n "${TMPDIR:-}" && "$REPO_ROOT" == "${TMPDIR%/}"/* ]]; then
+    echo "temp directory"; return
+  fi
+  # A worktree's git dir is .git/worktrees/<name>; its common dir is the main
+  # .git. Submodules also have a .git *file*, so that alone is not the test.
+  local common
+  common=$(git rev-parse --git-common-dir 2>/dev/null) || return 0
+  [[ "$common" != /* ]] && common="$PWD/$common"
+  if [[ "$(cd "$GIT_DIR" && pwd -P)" != "$(cd "$common" && pwd -P)" ]]; then
+    echo "git worktree"; return
+  fi
+}
+
+SKIP_REASON=$(_skip_reason)
+if [[ -n "$SKIP_REASON" ]]; then
+  echo "gai-watch: not watching $REPO_ROOT ($SKIP_REASON)."
+  # The hook wrote our PID here when it started us; leave no live-looking entry.
+  if [[ "$(awk '{print $1}' "$PID_FILE" 2>/dev/null)" == "$$" ]]; then
+    rm -f "$PID_FILE"
+  fi
+  case "$SKIP_REASON" in
+    "CI runner checkout"|"temp directory"|"git worktree")
+      echo "  To watch it anyway: echo 'allow=$REPO_ROOT' >> ~/.gai/watch" ;;
+  esac
+  exit 0
+fi
 
 _prune_watch_logs
 LOG_FILE="$LOG_DIR/$(date +%Y-%m-%d).watch.log"
@@ -61,6 +156,14 @@ _on_exit() {
   if [[ -f "$PID_FILE" ]] && [[ "$(awk '{print $1}' "$PID_FILE" 2>/dev/null)" == "$$" ]]; then
     rm -f "$PID_FILE"
   fi
+  if [[ -n "${IDLE_PID:-}" ]]; then
+    # Its sleep child first would make the subshell print "Terminated: 15".
+    local kids
+    kids=$(pgrep -P "$IDLE_PID" 2>/dev/null || true)
+    kill "$IDLE_PID" 2>/dev/null || true
+    # shellcheck disable=SC2086
+    [[ -z "$kids" ]] || kill $kids 2>/dev/null || true
+  fi
 }
 trap _on_exit EXIT
 
@@ -78,6 +181,50 @@ _shutdown() {
 }
 trap '_shutdown 130' INT
 trap '_shutdown 143' TERM
+
+touch "$SEEN_FILE" 2>/dev/null || true
+
+# Cap the number of watchers. The hook detaches watchers from the shell, so they
+# outlive it; past the cap, stop the ones whose repo was seen least recently.
+WATCH_MAX="${GAI_WATCH_MAX:-10}"
+if [[ "$WATCH_MAX" =~ ^[0-9]+$ ]] && (( WATCH_MAX > 0 )); then
+  _live=()
+  for _pf in /tmp/gai-watch-*.pid; do
+    [[ -f "$_pf" ]] || continue
+    _pid=$(awk '{print $1}' "$_pf" 2>/dev/null)
+    [[ -n "$_pid" && "$_pid" != "$$" ]] || continue
+    kill -0 "$_pid" 2>/dev/null || continue
+    ps -p "$_pid" -o command= 2>/dev/null | grep -q gai-watch || continue
+    _repo=$(awk '{print $2}' "$_pf" 2>/dev/null)
+    _seen=$(stat -f %m "/tmp/gai-watch-seen-$(echo "$_repo" | md5)" 2>/dev/null || echo 0)
+    _live+=("$_seen $_pid $_repo")
+  done
+  _excess=$(( ${#_live[@]} + 1 - WATCH_MAX ))
+  if (( _excess > 0 )); then
+    while read -r _ _pid _repo; do
+      echo "$(date '+%H:%M:%S') cap of $WATCH_MAX watchers reached — stopping the least recently used: $_repo"
+      kill "$_pid" 2>/dev/null || true
+    done < <(printf '%s\n' "${_live[@]}" | sort -n | head -n "$_excess")
+  fi
+fi
+
+# Stop when the repo has gone unvisited: no shell entered it and nothing touched
+# its index for GAI_WATCH_IDLE_HOURS (default 24, 0 = never). The next cd into
+# the repo starts a fresh watcher.
+IDLE_HOURS="${GAI_WATCH_IDLE_HOURS:-24}"
+IDLE_PID=""
+if [[ "$IDLE_HOURS" =~ ^[0-9]+$ ]] && (( IDLE_HOURS > 0 )); then
+  (
+    while sleep "${GAI_WATCH_IDLE_TICK:-600}"; do
+      if [[ -n "$(find "$SEEN_FILE" -mmin +$(( IDLE_HOURS * 60 )) 2>/dev/null)" ]]; then
+        echo "$(date '+%H:%M:%S') idle: no visit or index change in ${IDLE_HOURS}h — stopping (repo:$REPO_ROOT)"
+        kill -TERM $$ 2>/dev/null
+        exit 0
+      fi
+    done
+  ) &
+  IDLE_PID=$!
+fi
 
 # Watch the whole $GIT_DIR (recursive) and filter down to index files rather than
 # watching the $GIT_DIR/index path directly. Git never writes index in place — it
@@ -114,8 +261,9 @@ _last_run_file() {
 # One pass over every repo (parent + submodules) for a single fswatch event.
 _handle_trigger() {
   # Heartbeat: touch the PID file each pass so a wedged watcher is detectable by
-  # age, not only by kill -0.
-  touch "$PID_FILE" 2>/dev/null || true
+  # age, not only by kill -0. The seen file counts index changes as use, so a repo
+  # staged only from VS Code is never stopped as idle.
+  touch "$PID_FILE" "$SEEN_FILE" 2>/dev/null || true
 
   # Re-enumerate submodules on every trigger so submodules added after startup
   # are handled without restarting gai-watch.
