@@ -55,14 +55,23 @@ One commit per file. Conventional format.
   throttled trigger is logged rather than dropped silently
 - Runs `gai` with stdin from `/dev/null` — anything gai read from an inherited
   stdin would drain the fswatch pipe and end the watch loop
+- Before anything else, `_skip_reason` checks the repo against the skip rules
+  (CI checkouts, temp dirs, worktrees, `~/.gai/watch`) and exits 0 with the
+  reason. The check lives here, not in the hook, so every way of starting a
+  watcher obeys it, including old hooks and `install.sh`
+- Stops itself after `GAI_WATCH_IDLE_HOURS` with no touch of
+  `/tmp/gai-watch-seen-<md5>`, which the hook touches on every visit and the
+  watcher touches on every index change. On startup it enforces `GAI_WATCH_MAX`
+  by stopping the least recently seen watchers
 
 ### `~/.zshrc` hook
 
 ```zsh
 _gai_pidfile()     → /tmp/gai-watch-$(echo "$repo" | md5).pid
-_gai_watch_start() → checks PID file, confirms the PID is really a gai-watch
-                     (a recycled PID otherwise makes a dead watcher look alive
-                     forever), starts the watcher if not
+_gai_watch_start() → marks the visit (_gai_watch_seen), checks PID file,
+                     confirms the PID is really a gai-watch (a recycled PID
+                     otherwise makes a dead watcher look alive forever), starts
+                     the watcher detached (&!) if not
 _gai_chpwd_hook()  → registered with add-zsh-hook, fires on every cd
 _gai_watch_start   → also fires on shell init (covers VS Code terminal open)
 ```
