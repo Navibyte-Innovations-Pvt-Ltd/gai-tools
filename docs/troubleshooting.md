@@ -2,6 +2,10 @@
 
 ## gai-watch not starting automatically
 
+Some repos are skipped on purpose (CI checkouts, temp dirs, worktrees, your
+`~/.gai/watch` rules); the reason is in `/tmp/gai-watch-<hash>.log`. See
+[Which Repos Are Watched](usage.md#which-repos-are-watched).
+
 ```bash
 source ~/.zshrc                  # reload zshrc in current shell
 ls /tmp/gai-watch-*.pid          # check if PID file exists
@@ -75,6 +79,7 @@ retrying it too.
 ## Multiple watchers running
 
 ```bash
+gai status                       # every watcher, its repo, when last used
 ps aux | grep gai-watch          # should show exactly 1 per repo
 pkill -f gai-watch && rm -f /tmp/gai-watch-*.pid
 source ~/.zshrc                  # restart cleanly
