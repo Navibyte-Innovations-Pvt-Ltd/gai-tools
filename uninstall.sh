@@ -22,7 +22,7 @@ done
 # ── stop any running watchers ─────────────────────────────────────────────────
 
 pkill -f gai-watch 2>/dev/null || true
-rm -f /tmp/gai-watch-*.pid
+rm -f /tmp/gai-watch-*.pid /tmp/gai-watch-seen-*
 echo "✓ Stopped all gai-watch processes"
 
 # ── remove zshrc hook ─────────────────────────────────────────────────────────
