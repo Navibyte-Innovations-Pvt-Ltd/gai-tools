@@ -304,6 +304,29 @@ Flags and edge cases:
   `--dry-run` is the one exception to "no PR": with no open PR it prints the PR
   it *would* have created, since it writes nothing either way.
 - No `claude` on `PATH` skips the session question silently.
+
+**Which Claude model.** Just before launching, gai reads each issue's labels
+live (`gh issue view N --json labels`), so a label added or corrected after the
+issue was filed still counts. Glitchgrab's triage puts exactly one of
+`model:sonnet` / `model:opus` on each issue it classifies:
+
+| Labels | Session starts with | Printed line |
+|---|---|---|
+| `model:sonnet` | `claude --model sonnet` | `model: sonnet (label model:sonnet)` |
+| `model:opus` | `claude --model 'opus[1m]'` (1M context) | `model: opus[1m] (label model:opus)` |
+| neither | `claude` (its own default) | `model: claude default (no model:* label)` |
+| `gh` fails | `claude` (its own default) | `model: claude default (could not read issue labels)` |
+
+With several issues in one session the hardest one wins: any `model:opus`
+means `opus[1m]`, and the line names the issue it came from (`… on #456`). A label
+lookup failing never stops the launch.
+
+`GAI_CLAUDE_MODEL` overrides the label: `GAI_CLAUDE_MODEL=opus gai issue 123`
+always starts opus (any value `claude --model` takes, e.g. `opus[1m]`), and
+`GAI_CLAUDE_MODEL=default` always starts Claude's own default. It is a separate
+variable because `GAI_MODEL` is the Ollama commit model. `--dry-run` prints the
+model line and the `--model` it would pass. claude-squad's issue runner starts
+issues through `gai issue`, so its sessions get the same model.
 - Declining PR creation skips the attach but still offers the session.
 
 ## Copying a Database
