@@ -634,6 +634,72 @@ ${_closes_block}"
 
 # ── issue subcommand ──────────────────────────────────────────────────────────
 
+# Picks the Claude model for the issue session. Glitchgrab's triage puts one of
+# model:sonnet / model:opus on each issue it classifies; read live, because the
+# label can be added or corrected after the issue was filed. Sets
+# _claude_model ("" = don't pass --model, claude keeps its own default) and
+# prints one line saying which and why. Never fails: no label, no gh, no
+# network all fall back to claude's default.
+_gai_issue_claude_model() {
+  _claude_model=""
+
+  # An explicit choice beats the label. "default" forces claude's own default
+  # even on a labelled issue. Not GAI_MODEL: that one is the Ollama model.
+  if [[ -n "${GAI_CLAUDE_MODEL:-}" ]]; then
+    if [[ "$GAI_CLAUDE_MODEL" == "default" ]]; then
+      echo "model: claude default (GAI_CLAUDE_MODEL=default)"
+    else
+      _claude_model="$GAI_CLAUDE_MODEL"
+      echo "model: ${_claude_model} (GAI_CLAUDE_MODEL)"
+    fi
+    return 0
+  fi
+
+  local _n _labels _l _opus_on="" _sonnet_on="" _failed=false
+  for _n in $_issue_nums; do
+    if ! _labels=$(gh issue view "$_n" --repo "$_issue_repo" \
+      --json labels --jq '.labels[].name' 2> /dev/null); then
+      _failed=true
+      continue
+    fi
+    # One label per line; read whole lines so a label with spaces never splits
+    # into a false "model:opus".
+    while IFS= read -r _l; do
+      if [[ "$_l" == "model:opus" && -z "$_opus_on" ]]; then
+        _opus_on="$_n"
+      elif [[ "$_l" == "model:sonnet" && -z "$_sonnet_on" ]]; then
+        _sonnet_on="$_n"
+      fi
+    done <<< "$_labels"
+  done
+
+  # Several issues are one session: the hardest one sets the model. Opus keeps
+  # the 1M context window, the team's usual opus.
+  local _on="" _label=""
+  if [[ -n "$_opus_on" ]]; then
+    _claude_model="opus[1m]"
+    _label="model:opus"
+    _on="$_opus_on"
+  elif [[ -n "$_sonnet_on" ]]; then
+    _claude_model="sonnet"
+    _label="model:sonnet"
+    _on="$_sonnet_on"
+  fi
+
+  if [[ -n "$_claude_model" ]]; then
+    if [[ "$_issue_count" -gt 1 ]]; then
+      echo "model: ${_claude_model} (label ${_label} on #${_on})"
+    else
+      echo "model: ${_claude_model} (label ${_label})"
+    fi
+  elif [[ "$_failed" == "true" ]]; then
+    echo "model: claude default (could not read issue labels)"
+  else
+    echo "model: claude default (no model:* label)"
+  fi
+  return 0
+}
+
 # Compose every issue thread (title, labels, body, comments) into one prompt and
 # hand it to one interactive Claude session, so the user never re-types a URL.
 _gai_issue_claude_session() {
@@ -725,9 +791,15 @@ Open each one with the Read tool before starting — they are part of the instru
 ${_img_list}"
   fi
 
+  _gai_issue_claude_model
+
   if [[ "$_issue_dry_run" == "true" ]]; then
     echo ""
-    echo "── dry run: prompt that would be sent to claude ──"
+    if [[ -n "$_claude_model" ]]; then
+      echo "── dry run: prompt that would be sent to claude --model ${_claude_model} ──"
+    else
+      echo "── dry run: prompt that would be sent to claude ──"
+    fi
     echo "$_prompt"
     echo "─────────────────────────────────────────────────"
     return 0
@@ -735,6 +807,14 @@ ${_img_list}"
 
   echo "→ Launching Claude session…"
   # --add-dir is variadic: placed before the prompt it swallows it as a directory.
+  # --model takes exactly one value, so it is safe in front. Spelled out per case
+  # rather than as an args array: bash 3.2 with set -u errors on an empty one.
+  if [[ -n "$_claude_model" ]]; then
+    if [[ -n "$_img_list" ]]; then
+      exec claude --model "$_claude_model" "$_prompt" --add-dir "$_img_run"
+    fi
+    exec claude --model "$_claude_model" "$_prompt"
+  fi
   if [[ -n "$_img_list" ]]; then
     exec claude "$_prompt" --add-dir "$_img_run"
   fi
@@ -1421,6 +1501,8 @@ print(pick['browser_download_url'])")
       echo "                 A bare number resolves against the repo you are standing in."
       echo "                 --remove (-r) detaches instead: drops that issue's 'Closes #N',"
       echo "                 keeps the rest, and rewrites the title and body from what is left."
+      echo "                 Claude model: label model:sonnet -> sonnet, model:opus -> opus[1m];"
+      echo "                 \$GAI_CLAUDE_MODEL overrides (default = Claude's own default)."
       echo "  db           : menu — copy / verify / unfreeze a Postgres database"
       echo "  db copy      : copy one Postgres database into another — asks for the new URL,"
       echo "                 then the old one; optional freeze, all-or-nothing restore, row-count"
