@@ -9,6 +9,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) — [Semantic V
 ## [Unreleased]
 ### Added
 
+- feat(issue): `gai issue` starts Claude with the model its issue's label asks
+  for — `model:sonnet` → `--model sonnet`, `model:opus` → `--model 'opus[1m]'`
+  (Glitchgrab triage, glitchgrab#576). Labels are read live; with several issues
+  opus wins. No label or a failed lookup keeps Claude's default.
+  `GAI_CLAUDE_MODEL` overrides (`default` forces no flag). Prints
+  `model: <x> (<why>)`.
+
 - fix(gai-watch): watchers no longer start in every repo a shell visits (#56).
   CI runner checkouts, temp dirs and git worktrees are skipped, plus anything
   ruled out by `GAI_WATCH_DISABLE=1`, `watch=off` in `.gairc` or `~/.gai/watch`
