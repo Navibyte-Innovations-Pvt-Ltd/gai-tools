@@ -77,6 +77,21 @@ export GAI_MODEL=qwen2.5-coder:7b   # use a larger model
 
 Default: `qwen2.5-coder:1.5b` (~200ms on Apple Silicon)
 
+### Claude model for `gai issue`
+
+`gai issue` reads the issue's labels when it starts Claude. Glitchgrab's triage
+puts `model:sonnet` or `model:opus` on each issue it classifies; gai passes that
+on as `claude --model sonnet` or `claude --model 'opus[1m]'` (opus with the 1M
+context window) and prints e.g. `model: sonnet (label model:sonnet)`.
+No label, or the labels can't be read, means Claude's own default, as before.
+
+```bash
+export GAI_CLAUDE_MODEL=opus      # always this model, label ignored
+export GAI_CLAUDE_MODEL=default   # always Claude's own default, label ignored
+```
+
+`GAI_MODEL` is the Ollama commit model, not this one.
+
 ### Generation timeout (`gai issue`)
 
 ```bash
