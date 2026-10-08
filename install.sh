@@ -135,21 +135,22 @@ fi
 
 mkdir -p "$INSTALL_DIR"
 
-echo "→ Installing gai to $INSTALL_DIR/gai…"
-cp "$SCRIPT_DIR/gai" "$INSTALL_DIR/gai"
-chmod +x "$INSTALL_DIR/gai"
+# Copy beside the target, then rename over it. bash reads a script as it runs,
+# so a plain `cp` rewrote the file under every live gai and gai-watch — a run
+# in progress during `gai update` read spliced bytes and died mid-batch. A
+# rename gives the new file a new inode; running copies keep the old one.
+_install_script() {
+  local name="$1"
+  echo "→ Installing $name to $INSTALL_DIR/$name…"
+  cp "$SCRIPT_DIR/$name" "$INSTALL_DIR/.$name.new"
+  chmod +x "$INSTALL_DIR/.$name.new"
+  mv -f "$INSTALL_DIR/.$name.new" "$INSTALL_DIR/$name"
+}
 
-echo "→ Installing gai-watch to $INSTALL_DIR/gai-watch…"
-cp "$SCRIPT_DIR/gai-watch" "$INSTALL_DIR/gai-watch"
-chmod +x "$INSTALL_DIR/gai-watch"
-
-echo "→ Installing gai-db to $INSTALL_DIR/gai-db…"
-cp "$SCRIPT_DIR/gai-db" "$INSTALL_DIR/gai-db"
-chmod +x "$INSTALL_DIR/gai-db"
-
-echo "→ Installing gai-team to $INSTALL_DIR/gai-team…"
-cp "$SCRIPT_DIR/gai-team" "$INSTALL_DIR/gai-team"
-chmod +x "$INSTALL_DIR/gai-team"
+_install_script gai
+_install_script gai-watch
+_install_script gai-db
+_install_script gai-team
 
 # ── ensure ~/.local/bin is in PATH ───────────────────────────────────────────
 
