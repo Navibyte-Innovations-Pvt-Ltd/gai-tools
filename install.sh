@@ -141,7 +141,7 @@ mkdir -p "$INSTALL_DIR"
 # rename gives the new file a new inode; running copies keep the old one.
 _install_script() {
   local name="$1"
-  echo "→ Installing $name to $INSTALL_DIR/$name…"
+  echo "→ Installing ${name} to ${INSTALL_DIR}/${name}…"
   cp "$SCRIPT_DIR/$name" "$INSTALL_DIR/.$name.new"
   chmod +x "$INSTALL_DIR/.$name.new"
   mv -f "$INSTALL_DIR/.$name.new" "$INSTALL_DIR/$name"
