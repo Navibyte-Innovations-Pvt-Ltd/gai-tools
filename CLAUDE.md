@@ -43,6 +43,7 @@ gai-watch --dry-run     # watch + preview only
 
 ## Common issues
 
+- **`name�: unbound variable`**: bash 3.2 reads a UTF-8 char right after `$var` (`$name…`) as part of the name — write `${name}…`. Check: `LC_ALL=C grep -nE '\$[A-Za-z_][A-Za-z0-9_]*[^ -~]' gai gai-watch gai-db gai-team install.sh`
 - **shellcheck SC2015**: Use `if/else` instead of `cmd && x || y` chains
 - **bash 3.2 compat**: macOS ships bash 3.2; no `mapfile`/`readarray`, careful with arrays
 - **Lock/race**: `gai` uses a lockfile at `/tmp/gai-<repo-hash>.lock` — don't bypass it
