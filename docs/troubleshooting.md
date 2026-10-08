@@ -50,6 +50,28 @@ file, and `fswatch` exiting on its own is restarted after 2s with a logged line.
 If the log simply stops with no exit line, the process was killed with `SIGKILL`
 (or the machine slept) — restart it by `cd`-ing into the repo, or run `gai-watch`.
 
+## gai stops mid-run, or staged files sit until you type `gai`
+
+Three things used to strand staged files with nothing in the log:
+
+- **Ollama never answered.** Each commit message now has a 60 s budget
+  (`GAI_COMMIT_TIMEOUT`), the reply is capped and diffs are cut at
+  `GAI_MAX_DIFF_CHARS` (12000). A timeout logs
+  `✗ Ollama timed out after 60s (GAI_COMMIT_TIMEOUT) — leaving <file> uncommitted`.
+  Each message line ends with its time, e.g. `→ fix(x): … (14s)`; a slow model
+  (busy GPU, low RAM, model reloading after 5 min idle) shows up there.
+- **A trigger was lost** — staged while another run held the lock, or a commit
+  lost an `index.lock` race. Commits now retry `index.lock` twice, and every
+  watcher sweeps every 2 min (`GAI_WATCH_SWEEP`, `0` = off) and once at start:
+  `sweep: N file(s) left staged — running gai`. Unchanged leftovers (a secret
+  skip) are retried every 15 min, not every pass.
+- **A stale run lock** (`/tmp/gai-run-<hash>.lock`) whose PID was reused by
+  another process. It now counts only if the owner is a running `gai`.
+
+Every run header names the repo and who started it:
+`── gai 2026-10-08 00:00:17 repo:glitchgrab (watcher) ──` — `(manual)` is a
+hand-typed `gai`. Logs are kept `GAI_LOG_DAYS` days (default 7).
+
 ## Part of a large batch was left uncommitted
 
 `gai` commits one file per commit with a pathspec (`git commit -m … -- <file>`),
