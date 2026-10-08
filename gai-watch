@@ -7,9 +7,14 @@ set -euo pipefail
 
 LOG_DIR="${GAI_LOG_DIR:-$HOME/.gai/logs}"
 
+# Same retention as gai (GAI_LOG_DAYS, default 7). At 24 h a watcher started the
+# day before kept writing into a dated log that a newer watcher had deleted.
+LOG_DAYS="${GAI_LOG_DAYS:-7}"
+if ! [[ "$LOG_DAYS" =~ ^[1-9][0-9]*$ ]]; then LOG_DAYS=7; fi
+
 _prune_watch_logs() {
   mkdir -p "$LOG_DIR"
-  find "$LOG_DIR" -name "*.watch.log" -mmin +1440 -delete 2>/dev/null || true
+  find "$LOG_DIR" -name "*.watch.log" -mmin +$(( LOG_DAYS * 1440 )) -delete 2>/dev/null || true
 }
 
 EXTRA_ARGS=()
@@ -21,7 +26,8 @@ for arg in "$@"; do
       echo "  Watches .git/index and auto-runs gai when files are staged."
       echo "  Also watches submodule indices if submodules are present."
       echo "  Run once in a terminal tab. Stage files in VS Code → they commit."
-      echo "  Logs saved to \$GAI_LOG_DIR (default: ~/.gai/logs) for 24 h."
+      echo "  Logs saved to \$GAI_LOG_DIR (default: ~/.gai/logs) for \$GAI_LOG_DAYS days (default 7)."
+      echo "  Files left staged are swept every \$GAI_WATCH_SWEEP seconds (default 120, 0 = off)."
       exit 0
       ;;
   esac
@@ -156,14 +162,15 @@ _on_exit() {
   if [[ -f "$PID_FILE" ]] && [[ "$(awk '{print $1}' "$PID_FILE" 2>/dev/null)" == "$$" ]]; then
     rm -f "$PID_FILE"
   fi
-  if [[ -n "${IDLE_PID:-}" ]]; then
-    # Its sleep child first would make the subshell print "Terminated: 15".
-    local kids
-    kids=$(pgrep -P "$IDLE_PID" 2>/dev/null || true)
-    kill "$IDLE_PID" 2>/dev/null || true
+  local _bg kids
+  for _bg in "${IDLE_PID:-}" "${SWEEP_PID:-}"; do
+    [[ -n "$_bg" ]] || continue
+    # Its children first would make the subshell print "Terminated: 15".
+    kids=$(pgrep -P "$_bg" 2>/dev/null || true)
+    kill "$_bg" 2>/dev/null || true
     # shellcheck disable=SC2086
     [[ -z "$kids" ]] || kill $kids 2>/dev/null || true
-  fi
+  done
 }
 trap _on_exit EXIT
 
@@ -302,10 +309,54 @@ _handle_trigger() {
     # stdin comes from /dev/null, never the fswatch pipe: anything gai reads from
     # an inherited stdin drains that pipe, the read loop below sees EOF, and the
     # watcher exits 0 with nothing in the log — issue #28's silent death.
-    (cd "$repo" && gai ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} < /dev/null) || true
+    (cd "$repo" && GAI_FROM_WATCH=1 gai ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} < /dev/null) || true
     echo ""
   done
 }
+
+# Sweep for files left staged. A trigger is the only thing that starts gai, and
+# triggers get lost: one that lands while a run still holds the lock is skipped,
+# a commit that loses an index.lock race or an Ollama timeout leaves its file
+# staged, and files staged before this watcher started never fire at all. Each
+# of those sat until someone typed `gai` by hand. Never touches the seen file
+# unless there is real staged work, so the idle stop still works.
+SWEEP_SECS="${GAI_WATCH_SWEEP:-120}"
+SWEEP_PID=""
+if [[ "$SWEEP_SECS" =~ ^[1-9][0-9]*$ ]]; then
+  (
+    _run_lock="/tmp/gai-run-$(echo "$REPO_ROOT" | md5).lock"
+    _last_sig="" _last_at=0
+    sleep 5
+    while :; do
+      # Keep this watcher's dated log fresh, so pruning never deletes a file a
+      # live watcher still writes to.
+      touch "$LOG_FILE" 2>/dev/null || true
+      # Back off only for a live gai. A lock left by a killed run must not stop
+      # the sweep — gai itself reclaims it.
+      _busy=false
+      _owner=$(cat "$_run_lock/pid" 2>/dev/null || true)
+      if [[ -n "$_owner" ]] && kill -0 "$_owner" 2>/dev/null &&
+         ps -p "$_owner" -o command= 2>/dev/null | grep -qE 'bash ([^ ]*/)?gai( |$)'; then
+        _busy=true
+      fi
+      _staged=$(git -C "$REPO_ROOT" diff --cached --name-only 2>/dev/null || true)
+      if [[ -n "$_staged" ]] && ! $_busy; then
+        _sig=$(echo "$_staged" | md5)
+        _now=$(date +%s)
+        # Same leftovers as the last sweep (a secret skip, a file that keeps
+        # failing): retry them every 15 min, not every pass.
+        if [[ "$_sig" != "$_last_sig" ]] || (( _now - _last_at >= 900 )); then
+          echo "$(date '+%H:%M:%S') sweep: $(echo "$_staged" | wc -l | tr -d ' ') file(s) left staged — running gai"
+          _handle_trigger
+          _last_sig=$(git -C "$REPO_ROOT" diff --cached --name-only 2>/dev/null | md5)
+          _last_at=$(date +%s)
+        fi
+      fi
+      sleep "$SWEEP_SECS"
+    done
+  ) &
+  SWEEP_PID=$!
+fi
 
 # Re-arm forever. If fswatch exits for any reason the pipeline closes, the read
 # loop ends, and under `set -euo pipefail` the script would exit 0 in silence.

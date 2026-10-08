@@ -7,20 +7,34 @@
 #   --dry-run          : print messages, don't commit
 #   --force            : skip the secret checks for this run
 #   --version          : print installed gai-tools version
-#   --logs             : show last 24 h of activity
+#   --logs             : show last 24 h of activity (files kept GAI_LOG_DAYS, default 7)
 
 set -euo pipefail
 
 MODEL="${GAI_MODEL:-qwen2.5-coder:1.5b}"
+# Seconds one commit message may take; past it the file stays staged and the
+# watcher's sweep retries it. Diffs are cut to MAX_DIFF_CHARS before sending.
+COMMIT_TIMEOUT="${GAI_COMMIT_TIMEOUT:-60}"
+if ! [[ "$COMMIT_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then COMMIT_TIMEOUT=60; fi
+MAX_DIFF_CHARS="${GAI_MAX_DIFF_CHARS:-12000}"
+if ! [[ "$MAX_DIFF_CHARS" =~ ^[1-9][0-9]*$ ]]; then MAX_DIFF_CHARS=12000; fi
+GEN_FAIL="" GEN_SECS=0 GEN_TIMED_OUT=false
 OLLAMA_URL="http://localhost:11434/api/generate"
 DRY_RUN=false
 FORCE=false
 MODE="staged"
 LOG_DIR="${GAI_LOG_DIR:-$HOME/.gai/logs}"
 
+# Kept a week, not a day: a stall is usually noticed the next day, and a 24 h
+# prune had already deleted the evidence (and the dated watch log a still-running
+# watcher was writing to). A watcher that goes quiet stops itself after
+# GAI_WATCH_IDLE_HOURS, so nothing live writes to a file this old.
+LOG_DAYS="${GAI_LOG_DAYS:-7}"
+if ! [[ "$LOG_DAYS" =~ ^[1-9][0-9]*$ ]]; then LOG_DAYS=7; fi
+
 _prune_logs() {
   mkdir -p "$LOG_DIR"
-  find "$LOG_DIR" -name "*.log" -mmin +1440 -delete 2>/dev/null || true
+  find "$LOG_DIR" -name "*.log" -mmin +$(( LOG_DAYS * 1440 )) -delete 2>/dev/null || true
 }
 
 # ── arrow-key selection menu ──────────────────────────────────────────────────
@@ -1094,7 +1108,7 @@ if [[ "${1:-}" == "issue" ]]; then
           _rl=true
         fi
 
-        # Logs are pruned after 24 h; images get 7 days, because a Claude session
+        # Logs are pruned after GAI_LOG_DAYS; images get 7 days, because a Claude session
         # is often resumed the next day and still needs to open them.
         if [[ -d "$_img_dir" ]]; then
           find "$_img_dir" -mindepth 1 -maxdepth 1 -mtime +7 -exec rm -rf {} + 2> /dev/null || true
@@ -1747,7 +1761,11 @@ fi
 _prune_logs
 LOG_FILE="$LOG_DIR/$(date +%Y-%m-%d).log"
 exec > >(tee -a "$LOG_FILE") 2>&1
-echo "── gai $(date '+%Y-%m-%d %H:%M:%S') ──────────────────────────────────────────"
+# Repo and who started the run, so a stall in the shared dated log can be traced
+# to a repo and told apart from a hand-typed `gai`.
+_run_repo=$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")
+if [[ "${GAI_FROM_WATCH:-}" == 1 ]]; then _run_by=watcher; else _run_by=manual; fi
+echo "── gai $(date '+%Y-%m-%d %H:%M:%S') repo:$_run_repo ($_run_by) ──────────────────────────"
 
 # ── sanity checks ────────────────────────────────────────────────────────────
 
@@ -1824,6 +1842,22 @@ _release_lock() {
   fi
 }
 
+# INT/TERM must exit too: a handler that only released the lock let the run
+# carry on unlocked, racing the next one.
+_lock_traps() {
+  trap _release_lock EXIT
+  trap '_release_lock; exit 130' INT
+  trap '_release_lock; exit 143' TERM
+}
+
+# A live PID is not enough — once the owner dies its number gets reused, and a
+# stale lock owned by some unrelated process blocked the repo for good (the same
+# trap issue #28 hit with watcher pidfiles). Only a running gai counts.
+_lock_owner_alive() {
+  [[ -n "$1" ]] && kill -0 "$1" 2>/dev/null &&
+    ps -p "$1" -o command= 2>/dev/null | grep -qE 'bash ([^ ]*/)?gai( |$)'
+}
+
 _acquire_lock() {
   local repo repo_hash
   repo=$(git rev-parse --show-toplevel 2>/dev/null) || return 0
@@ -1832,14 +1866,14 @@ _acquire_lock() {
 
   if mkdir "$GAI_LOCK_DIR" 2>/dev/null; then
     echo $$ > "$GAI_LOCK_DIR/pid"
-    trap _release_lock EXIT INT TERM
+    _lock_traps
     return 0
   fi
 
   # Lock exists — reclaim only if the owning process is dead.
   local owner
   owner=$(cat "$GAI_LOCK_DIR/pid" 2>/dev/null || true)
-  if [[ -n "$owner" ]] && kill -0 "$owner" 2>/dev/null; then
+  if _lock_owner_alive "$owner"; then
     echo "Another gai is already running for this repo (pid $owner) — skipping."
     GAI_LOCK_DIR=""
     exit 0
@@ -1848,7 +1882,7 @@ _acquire_lock() {
   rm -rf "$GAI_LOCK_DIR" 2>/dev/null || true
   if mkdir "$GAI_LOCK_DIR" 2>/dev/null; then
     echo $$ > "$GAI_LOCK_DIR/pid"
-    trap _release_lock EXIT INT TERM
+    _lock_traps
     return 0
   fi
 
@@ -2005,6 +2039,12 @@ _short_scope() {
 
 gen_message() {
   local file="$1" diff="$2"
+  # A huge diff (lockfile, generated code, big fixture) only slows the model
+  # down; the head of it says what the change is.
+  if [[ ${#diff} -gt $MAX_DIFF_CHARS ]]; then
+    diff="${diff:0:$MAX_DIFF_CHARS}
+… (diff truncated at $MAX_DIFF_CHARS chars)"
+  fi
   local suggested_scope
   suggested_scope=$(_short_scope "$file")
   local prompt="Write a git commit message in conventional commit format for this diff.
@@ -2025,10 +2065,24 @@ $diff"
   local escaped
   escaped=$(python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" <<< "$prompt")
 
-  local response
-  response=$(curl -s --connect-timeout 10 "$OLLAMA_URL" \
+  # Bounded on every side. With no --max-time a wedged Ollama (GPU or RAM
+  # starved) held this run, its lock and the watcher's read loop forever, and
+  # every file staged after it sat until someone typed `gai` by hand.
+  # num_predict stops a small model that loops; the reply only needs one line.
+  local response _t0 _rc=0
+  _t0=$(date +%s)
+  response=$(curl -s --connect-timeout 10 --max-time "$COMMIT_TIMEOUT" "$OLLAMA_URL" \
     -H "Content-Type: application/json" \
-    -d "{\"model\":\"$MODEL\",\"prompt\":$escaped,\"stream\":false}")
+    -d "{\"model\":\"$MODEL\",\"prompt\":$escaped,\"stream\":false,\"options\":{\"num_predict\":80}}") || _rc=$?
+  GEN_SECS=$(( $(date +%s) - _t0 ))
+  if [[ $_rc -eq 28 ]]; then
+    GEN_FAIL="Ollama timed out after ${COMMIT_TIMEOUT}s (GAI_COMMIT_TIMEOUT)"
+    GEN_TIMED_OUT=true
+    return 0
+  elif [[ $_rc -ne 0 ]]; then
+    GEN_FAIL="Ollama request failed (curl exit $_rc) after ${GEN_SECS}s"
+    return 0
+  fi
 
   local msg
   msg=$(python3 -c "
@@ -2107,14 +2161,23 @@ commit_file() {
     return 1
   fi
 
-  local msg
-  msg=$(gen_message "$file" "$diff")
+  # gen_message runs in this shell, not in $(…), so GEN_FAIL and GEN_SECS
+  # survive; the message itself goes through a temp file.
+  local msg _gen_out
+  GEN_FAIL="" GEN_SECS=0
+  _gen_out=$(mktemp "${TMPDIR:-/tmp}/gai-msg.XXXXXX")
+  gen_message "$file" "$diff" > "$_gen_out"
+  msg=$(cat "$_gen_out"); rm -f "$_gen_out"
+  if [[ -n "$GEN_FAIL" ]]; then
+    echo "  ✗ $GEN_FAIL — leaving $file uncommitted for the next run"
+    return 1
+  fi
   if [[ -z "$msg" ]]; then
-    echo "  ✗ model returned empty message — skipping"
+    echo "  ✗ model returned empty message (${GEN_SECS}s) — skipping"
     return 1
   fi
 
-  echo "  → $msg"
+  echo "  → $msg  (${GEN_SECS}s)"
 
   if $DRY_RUN; then
     echo "  (dry-run)"
@@ -2122,10 +2185,25 @@ commit_file() {
     # Pathspec-limited commit — records ONLY this file. A bare `git commit -m`
     # here sweeps in anything another process staged while the model was
     # generating the message, filing it under the wrong message entirely.
-    if ! git commit --no-verify -m "$msg" -- "$file"; then
+    # Another git process (a Claude session, the IDE) holding index.lock made
+    # this fail outright, and the file waited for some later trigger. Retry a
+    # few times; anything else is a real failure.
+    local _try=1 _out
+    while :; do
+      if _out=$(git commit --no-verify -m "$msg" -- "$file" 2>&1); then
+        printf '%s\n' "$_out"
+        break
+      fi
+      if [[ "$_out" == *index.lock* && $_try -lt 3 ]]; then
+        echo "  … index.lock held by another git process — retry $_try/2 in 2s"
+        _try=$((_try + 1))
+        sleep 2
+        continue
+      fi
+      printf '%s\n' "$_out"
       echo "  ✗ commit failed — leaving $file staged"
       return 1
-    fi
+    done
   fi
   return 0
 }
@@ -2176,7 +2254,15 @@ if [[ "$MODE" == "staged" ]]; then
       else
         SKIPPED+=("$FILE")
       fi
+      # One timeout means Ollama is wedged; waiting out the budget once per file
+      # held the lock for half an hour. Leave the rest staged for the sweep.
+      $GEN_TIMED_OUT && break
     done
+    if $GEN_TIMED_OUT; then
+      echo ""
+      echo "⚠ Ollama is not answering — stopping this run; the rest stay staged and gai-watch retries in ~2 min."
+      break
+    fi
 
     # Adopt whatever was staged while this run was busy. gai-watch's triggers for
     # those files were dropped by the per-repo lock, so the finishing run is the
@@ -2234,6 +2320,11 @@ else
     else
       git reset HEAD -- "$FILE" > /dev/null 2>&1 || true
       SKIPPED+=("$FILE")
+    fi
+    if $GEN_TIMED_OUT; then
+      echo ""
+      echo "⚠ Ollama is not answering — stopping this run; run 'gai --all' again once it responds."
+      break
     fi
   done
 fi
