@@ -820,19 +820,59 @@ ${_img_list}"
   fi
 
   echo "→ Launching Claude session…"
+  # Colour first. /color typed after the issue prompt is already running is
+  # applied at once but printed only when the first reply ends, so it looked
+  # set "in between". In a tmux pane Claude is started with "/color <c>" as
+  # its first message (idle prompt, note printed at the very top) and the
+  # issue prompt is pasted right after. Same palette order and issue-number
+  # start as claude-squad's pickFor, so the cs tile matches. Not in tmux:
+  # the prompt goes on the command line as before.
+  _first_color=""
+  if [[ -n "${TMUX_PANE:-}" && "${GAI_FIRST_COLOR:-yes}" != "no" ]] && command -v tmux > /dev/null 2>&1; then
+    _colors=(red blue green yellow purple orange pink cyan)
+    _first_n="${_issue_nums%%[!0-9]*}"
+    [[ -z "$_first_n" ]] && _first_n=$(printf '%s' "$_issue_nums" | tr -cd '0-9' | head -c 6)
+    if [[ -n "$_first_n" ]]; then
+      _first_color="${_colors[$(( 10#$_first_n % 8 ))]}"
+    fi
+  fi
+  if [[ -n "$_first_color" ]]; then
+    _pf=$(mktemp "${TMPDIR:-/tmp}/gai-prompt.XXXXXX")
+    printf '%s' "$_prompt" > "$_pf"
+    (
+      # Wait for Claude to print "Session color set", then paste the prompt
+      # (bracketed, so newlines stay in the box) and press Enter. After 45s
+      # paste anyway so a session is never left empty.
+      _i=0
+      while (( _i < 90 )); do
+        tmux capture-pane -p -t "$TMUX_PANE" 2> /dev/null | grep -q "Session color set" && break
+        sleep 0.5; _i=$(( _i + 1 ))
+      done
+      sleep 0.5
+      tmux load-buffer -b "gai$$" "$_pf" \
+        && tmux paste-buffer -p -d -b "gai$$" -t "$TMUX_PANE"
+      sleep 0.5
+      tmux send-keys -t "$TMUX_PANE" Enter
+      rm -f "$_pf"
+    ) > /dev/null 2>&1 &
+    disown 2> /dev/null || true
+    _first_msg="/color $_first_color"
+  else
+    _first_msg="$_prompt"
+  fi
   # --add-dir is variadic: placed before the prompt it swallows it as a directory.
   # --model takes exactly one value, so it is safe in front. Spelled out per case
   # rather than as an args array: bash 3.2 with set -u errors on an empty one.
   if [[ -n "$_claude_model" ]]; then
     if [[ -n "$_img_list" ]]; then
-      exec claude --model "$_claude_model" "$_prompt" --add-dir "$_img_run"
+      exec claude --model "$_claude_model" "$_first_msg" --add-dir "$_img_run"
     fi
-    exec claude --model "$_claude_model" "$_prompt"
+    exec claude --model "$_claude_model" "$_first_msg"
   fi
   if [[ -n "$_img_list" ]]; then
-    exec claude "$_prompt" --add-dir "$_img_run"
+    exec claude "$_first_msg" --add-dir "$_img_run"
   fi
-  exec claude "$_prompt"
+  exec claude "$_first_msg"
 }
 
 # 'gai db …' copies databases — its own script, nothing to do with commits.
