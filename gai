@@ -109,7 +109,7 @@ _gai_ollama_gen() {
   fi
   if ! _raw=$("${_curl[@]}" "$OLLAMA_URL" \
     -H "Content-Type: application/json" \
-    -d "{\"model\":\"$MODEL\",\"prompt\":$_escaped,\"stream\":false}"); then
+    -d "{\"model\":\"$MODEL\",\"prompt\":$_escaped,\"stream\":false,\"options\":{\"num_ctx\":${GAI_NUM_CTX:-8192}}}"); then
     return 1
   fi
   printf '%s' "$_raw" | python3 -c "
@@ -122,9 +122,23 @@ except Exception:
 " || true
 }
 
+# A small model fed an oversized or truncated prompt echoes issue markup
+# ("<details>") or refuses. Whatever it returns would be written to the PR
+# unchecked, so reject it here: the callers fall back to what the PR already has.
+# $1 = text. Returns 0 when it looks like a refusal / chatbot preamble.
+_gai_is_refusal() {
+  # Only the opening line: a refusal leads the reply, while a body that
+  # legitimately says "as an AI model" further down must survive.
+  printf '%s\n' "$1" | head -n 1 \
+    | grep -qiE "(i'm sorry|i am sorry|i can't (assist|help)|i cannot (assist|help)|as an ai([^a-z]|$)|unable to assist)"
+}
+
 # $1 = branch, $2 = commit list, $3 = issue context (optional).
 _gai_gen_pr_title() {
   local _branch="$1" _commits="$2" _issues="${3:-}" _stat="${4:-}" _prompt _out _title
+  # A long-lived branch (dev) lists hundreds of commits; past the model's window
+  # the instructions at the top are what gets dropped.
+  _commits=$(printf '%s\n' "$_commits" | head -n 60)
 
   _prompt="Generate a GitHub pull request title for this branch.
 Reply with ONLY the title on one line. No explanation. No backticks. No quotes. No trailing period.
@@ -184,6 +198,11 @@ if len(t) > 72:
 print(t)
 ")
 
+  # Conventional-commit shape or nothing: "<details>" and refusals die here.
+  if _gai_is_refusal "$_title" \
+    || ! printf '%s' "$_title" | grep -qE '^(feat|fix|refactor|style|docs|test|chore|perf)(\([^)]+\))?!?: .+'; then
+    _title=""
+  fi
 
   printf '%s\n' "$_title"
 }
@@ -191,6 +210,9 @@ print(t)
 # $1 = branch, $2 = commit list, $3 = diffstat (optional), $4 = issue context (optional).
 _gai_gen_pr_body() {
   local _branch="$1" _commits="$2" _diffstat="${3:-}" _issues="${4:-}" _changes _prompt
+  # A long-lived branch (dev) lists hundreds of commits; past the model's window
+  # the instructions at the top are what gets dropped.
+  _commits=$(printf '%s\n' "$_commits" | head -n 60)
   if [[ -n "$_diffstat" ]]; then
     _changes="$_diffstat"
   else
@@ -228,6 +250,10 @@ $_issues"
   local _out
   _out=$(_gai_ollama_gen "$_prompt") || return 1
   if [[ -n "$_out" ]]; then
+    # Refusal, or none of the requested structure: unusable, same as empty.
+    if _gai_is_refusal "$_out" || ! printf '%s' "$_out" | grep -q '^## '; then
+      return 0
+    fi
     _gai_md_sanitize "$_out"
   fi
 }
@@ -1319,12 +1345,22 @@ for c in (d.get('commits') or [])[:40]:
       echo "→ No issues left linked — title and body fall back to the commit list."
     fi
     _issues_ctx=""
+    # Many issues in one PR: per-issue caps still add up past the model's
+    # window, which drops the instructions at the top of the prompt. Shrink
+    # each thread so the whole block stays near GAI_ISSUE_CTX_BYTES (6000).
+    _ctx_n=$(printf '%s\n' "$_all_nums" | grep -c . || true)
+    _ctx_each=2000
+    if [[ "$_ctx_n" -gt 0 ]]; then
+      _ctx_each=$(( ${GAI_ISSUE_CTX_BYTES:-6000} / _ctx_n ))
+      [[ "$_ctx_each" -gt 2000 ]] && _ctx_each=2000
+      [[ "$_ctx_each" -lt 80 ]] && _ctx_each=80
+    fi
     for _n in $_all_nums; do
       _one=$(gh issue view "$_n" --repo "$_issue_repo" --json title,body \
         --jq '"\(.title)\n\(.body // "")"' 2>/dev/null || true)
       if [[ -n "$_one" ]]; then
         # Cap each thread — a long issue body starves the model's context window.
-        _one=$(printf '%s' "$_one" | head -c 2000)
+        _one=$(printf '%s' "$_one" | head -c "$_ctx_each")
         _issues_ctx="${_issues_ctx}### Issue #${_n}
 ${_one}
 
