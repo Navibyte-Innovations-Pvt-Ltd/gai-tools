@@ -28,6 +28,7 @@ for arg in "$@"; do
       echo "  Run once in a terminal tab. Stage files in VS Code → they commit."
       echo "  Logs saved to \$GAI_LOG_DIR (default: ~/.gai/logs) for \$GAI_LOG_DAYS days (default 7)."
       echo "  Files left staged are swept every \$GAI_WATCH_SWEEP seconds (default 120, 0 = off)."
+      echo "  Index changes fswatch never reported are polled every \$GAI_WATCH_POLL seconds (default 15, 0 = off)."
       exit 0
       ;;
   esac
@@ -50,6 +51,9 @@ PID_FILE="/tmp/gai-watch-${REPO_HASH}.pid"
 # Touched on every shell visit (.zshrc hook) and every index change; its age is
 # what the idle stop below measures.
 SEEN_FILE="/tmp/gai-watch-seen-${REPO_HASH}"
+# Touched by the fswatch loop around every pass; the poll below reads it to tell
+# "fswatch reported this index change" from "fswatch said nothing" (issue #62).
+EVENT_FILE="/tmp/gai-watch-event-${REPO_HASH}"
 WATCH_CONF="$HOME/.gai/watch"
 
 # Lines of `key=value` from a file, comments and blanks dropped. Read line by
@@ -163,7 +167,7 @@ _on_exit() {
     rm -f "$PID_FILE"
   fi
   local _bg kids
-  for _bg in "${IDLE_PID:-}" "${SWEEP_PID:-}"; do
+  for _bg in "${IDLE_PID:-}" "${SWEEP_PID:-}" "${POLL_PID:-}"; do
     [[ -n "$_bg" ]] || continue
     # Its children first would make the subshell print "Terminated: 15".
     kids=$(pgrep -P "$_bg" 2>/dev/null || true)
@@ -189,7 +193,7 @@ _shutdown() {
 trap '_shutdown 130' INT
 trap '_shutdown 143' TERM
 
-touch "$SEEN_FILE" 2>/dev/null || true
+touch "$SEEN_FILE" "$EVENT_FILE" 2>/dev/null || true
 
 # Cap the number of watchers. The hook detaches watchers from the shell, so they
 # outlive it; past the cap, stop the ones whose repo was seen least recently.
@@ -213,6 +217,30 @@ if [[ "$WATCH_MAX" =~ ^[0-9]+$ ]] && (( WATCH_MAX > 0 )); then
       kill "$_pid" 2>/dev/null || true
     done < <(printf '%s\n' "${_live[@]}" | sort -n | head -n "$_excess")
   fi
+fi
+
+# Retire watchers older than this build of gai-watch (issue #62). A watcher keeps
+# the code it started with, so ones from before a fix (the #56 skip rules, this
+# poll) outlived it for weeks. Only watchers started from this same script path
+# are touched, so a checkout run for testing never stops the installed ones.
+_self="$0"
+if [[ "$_self" != /* ]]; then _self="$PWD/$_self"; fi
+_self_mtime=$(stat -f %m "$_self" 2>/dev/null || echo 0)
+if (( _self_mtime > 0 )); then
+  for _pf in /tmp/gai-watch-*.pid; do
+    [[ -f "$_pf" ]] || continue
+    _pid=$(awk '{print $1}' "$_pf" 2>/dev/null)
+    [[ "$_pid" =~ ^[0-9]+$ && "$_pid" != "$$" ]] || continue
+    kill -0 "$_pid" 2>/dev/null || continue
+    ps -p "$_pid" -o command= 2>/dev/null | grep -qF -- "$_self" || continue
+    _lstart=$(ps -p "$_pid" -o lstart= 2>/dev/null) || continue
+    _started=$(date -j -f '%a %b %e %T %Y' "$_lstart" +%s 2>/dev/null) || continue
+    if (( _started < _self_mtime )); then
+      echo "$(date '+%H:%M:%S') retiring watcher pid $_pid (started before this gai-watch build): $(awk '{print $2}' "$_pf")"
+      kill "$_pid" 2>/dev/null || true
+      rm -f "$_pf"
+    fi
+  done
 fi
 
 # Stop when the repo has gone unvisited: no shell entered it and nothing touched
@@ -314,6 +342,29 @@ _handle_trigger() {
   done
 }
 
+# Back off only for a live gai. A lock left by a killed run must not stop the
+# sweep or the poll — gai itself reclaims it.
+_RUN_LOCK="/tmp/gai-run-$(echo "$REPO_ROOT" | md5).lock"
+_gai_busy() {
+  local owner
+  owner=$(cat "$_RUN_LOCK/pid" 2>/dev/null || true)
+  [[ -n "$owner" ]] && kill -0 "$owner" 2>/dev/null &&
+    ps -p "$owner" -o command= 2>/dev/null | grep -qE 'bash ([^ ]*/)?gai( |$)'
+}
+
+# Is anything staged in the repo or a submodule?
+_has_staged() {
+  git -C "$REPO_ROOT" diff --cached --quiet 2>/dev/null || return 0
+  [[ -n "$(git -C "$REPO_ROOT" submodule --quiet foreach --recursive \
+    'git diff --cached --quiet 2>/dev/null || echo y' 2>/dev/null)" ]]
+}
+
+# Newest mtime of any index under $GIT_DIR: the repo's and every submodule's.
+_index_mtime() {
+  find "$GIT_DIR" \( -name objects -o -name logs \) -prune -o -name index -type f \
+    -exec stat -f %m {} + 2>/dev/null | sort -n | tail -1 || true
+}
+
 # Sweep for files left staged. A trigger is the only thing that starts gai, and
 # triggers get lost: one that lands while a run still holds the lock is skipped,
 # a commit that loses an index.lock race or an Ollama timeout leaves its file
@@ -324,21 +375,14 @@ SWEEP_SECS="${GAI_WATCH_SWEEP:-120}"
 SWEEP_PID=""
 if [[ "$SWEEP_SECS" =~ ^[1-9][0-9]*$ ]]; then
   (
-    _run_lock="/tmp/gai-run-$(echo "$REPO_ROOT" | md5).lock"
     _last_sig="" _last_at=0
     sleep 5
     while :; do
       # Keep this watcher's dated log fresh, so pruning never deletes a file a
       # live watcher still writes to.
       touch "$LOG_FILE" 2>/dev/null || true
-      # Back off only for a live gai. A lock left by a killed run must not stop
-      # the sweep — gai itself reclaims it.
       _busy=false
-      _owner=$(cat "$_run_lock/pid" 2>/dev/null || true)
-      if [[ -n "$_owner" ]] && kill -0 "$_owner" 2>/dev/null &&
-         ps -p "$_owner" -o command= 2>/dev/null | grep -qE 'bash ([^ ]*/)?gai( |$)'; then
-        _busy=true
-      fi
+      if _gai_busy; then _busy=true; fi
       _staged=$(git -C "$REPO_ROOT" diff --cached --name-only 2>/dev/null || true)
       if [[ -n "$_staged" ]] && ! $_busy; then
         _sig=$(echo "$_staged" | md5)
@@ -358,6 +402,52 @@ if [[ "$SWEEP_SECS" =~ ^[1-9][0-9]*$ ]]; then
   SWEEP_PID=$!
 fi
 
+# Poll for index changes fswatch never reported. When macOS fseventsd wedges,
+# every fswatch on the machine goes quiet at once and no trigger ever fires
+# (issue #62). One find+stat per pass. If the index changed, nothing staged it
+# through the fswatch loop (EVENT_FILE is older than the index) and a few seconds
+# have passed, run the same pass fswatch would have run. A live gai defers it.
+POLL_SECS="${GAI_WATCH_POLL:-15}"
+POLL_PID=""
+if [[ "$POLL_SECS" =~ ^[1-9][0-9]*$ ]]; then
+  (
+    _grace=$(( DEBOUNCE + 6 ))
+    _last_mt=$(_index_mtime)
+    _pending=false _hinted=false
+    while :; do
+      sleep "$POLL_SECS"
+      _mt=$(_index_mtime)
+      if [[ -n "$_mt" && "$_mt" != "$_last_mt" ]]; then
+        _last_mt="$_mt"
+        _pending=true
+      fi
+      $_pending || continue
+      _ev=$(stat -f %m "$EVENT_FILE" 2>/dev/null || echo 0)
+      if (( _ev >= _last_mt )); then
+        _pending=false
+        continue
+      fi
+      _age=$(( $(date +%s) - _last_mt ))
+      (( _age >= _grace )) || continue
+      if ! _has_staged; then
+        _pending=false
+        continue
+      fi
+      _gai_busy && continue
+      if $_hinted; then
+        echo "$(date '+%H:%M:%S') fswatch silent for ${_age}s while index changed — committing via poll (repo:$REPO_ROOT)"
+      else
+        echo "$(date '+%H:%M:%S') fswatch silent for ${_age}s while index changed — fseventsd may be stuck; committing via poll (repo:$REPO_ROOT)"
+        echo "   To clear it: sudo killall fseventsd   (launchd restarts it; then restart the watchers)"
+        _hinted=true
+      fi
+      _pending=false
+      _handle_trigger
+    done
+  ) &
+  POLL_PID=$!
+fi
+
 # Re-arm forever. If fswatch exits for any reason the pipeline closes, the read
 # loop ends, and under `set -euo pipefail` the script would exit 0 in silence.
 # Restart it instead, and say so.
@@ -365,7 +455,11 @@ PIPELINE_PID=""
 while true; do
   (
     fswatch -o --latency "$DEBOUNCE" "${WATCH_FILTERS[@]}" "${WATCH_TARGETS[@]}" | while read -r _; do
+      touch "$EVENT_FILE" 2>/dev/null || true
       _handle_trigger
+      # Again after the pass: index changes made while gai ran were seen by
+      # fswatch, they just wait in the pipe behind this pass.
+      touch "$EVENT_FILE" 2>/dev/null || true
     done
   ) &
   PIPELINE_PID=$!

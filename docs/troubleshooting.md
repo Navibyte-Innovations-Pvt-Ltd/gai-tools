@@ -72,6 +72,26 @@ Every run header names the repo and who started it:
 `── gai 2026-10-08 00:00:17 repo:glitchgrab (watcher) ──` — `(manual)` is a
 hand-typed `gai`. Logs are kept `GAI_LOG_DAYS` days (default 7).
 
+## Staged files sit and the watcher log shows only the banner
+
+Every repo stops committing at once, `~/.gai/logs/*.watch.log` ends at
+`gai-watch active`, and `fswatch` sees nothing even for a plain `touch` in a
+folder: macOS `fseventsd` has wedged (check `ps -o pid,%cpu,rss,lstart -p $(pgrep -x fseventsd)`:
+weeks of uptime, GBs of RSS). It is not gai.
+
+- **Poll fallback.** Every `GAI_WATCH_POLL` seconds (default 15, `0` = off) the
+  watcher checks the newest `.git/index` mtime (submodules included). A change
+  fswatch never reported, a few seconds old, with files staged, runs the same
+  pass fswatch would have:
+  `fswatch silent for 9s while index changed — fseventsd may be stuck; committing via poll`.
+  A stuck fseventsd now costs about 15 s, not "never".
+- **Clear it:** `sudo killall fseventsd` (launchd restarts it), then restart the
+  watchers (or `cd` into each repo).
+- **Old watchers retire themselves.** A watcher keeps the code it started with.
+  A new watcher stops any started from the same `gai-watch` path before that
+  file's last change: `retiring watcher pid N (started before this gai-watch build)`.
+  `gai update` re-copies the script, so the next repo you enter cleans up the rest.
+
 ## Part of a large batch was left uncommitted
 
 `gai` commits one file per commit with a pathspec (`git commit -m … -- <file>`),
