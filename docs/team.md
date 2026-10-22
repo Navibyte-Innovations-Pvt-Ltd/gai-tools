@@ -23,9 +23,15 @@ Without a `claude-config` repo, `gai update` doesn't touch any of this.
   `.gitattributes`, `.gitignore` and `keys/`.
 - Each person gets a personal **age** key (`~/.gai/team-identity`, also in the Keychain
   under `gai-team`).
-- **Joining:** a newcomer's `gai update` pushes `keys/<login>.pub`. On the next sync, any
-  unlocked teammate's laptop checks the newcomer is a repo collaborator, then locks the team
-  key to their public key (`keys/<login>.age`). The newcomer's next sync unlocks itself.
+- **Joining:** a newcomer's `gai update` adds this laptop's public key to `keys/<login>.pub`.
+  On the next sync, any unlocked teammate's laptop checks the newcomer is a repo collaborator,
+  then locks the team key to their public key (`keys/<login>.age`). The newcomer's next sync
+  unlocks itself.
+- **A second laptop:** `keys/<login>.pub` holds one line per laptop, and `gai update` on a new
+  laptop appends to it instead of replacing it. `keys/<login>.granted` records which keys the
+  `.age` was locked for. When a new line appears, the next sync on any unlocked laptop (yours
+  or a teammate's) locks the team key again, this time for every one of that person's laptops.
+  `gai team` shows `a new laptop is waiting for the key` until that happens.
 - The team key is kept in the Keychain (`gai-team` / `team-key`). On a laptop's first
   unlock, gai offers a copy to Apple Passwords or Google Password Manager.
 - Sync refuses to push any file that isn't ciphertext.
@@ -43,7 +49,7 @@ Without a `claude-config` repo, `gai update` doesn't touch any of this.
 | `gai team` | status: repo, locked or unlocked, members |
 | `gai team setup` | what `gai update` runs; safe to repeat |
 | `gai team add <user>` | makes them a collaborator; they just run `gai update` |
-| `gai team remove <user>` | removes access, **rotates the team key**, re-grants everyone left |
+| `gai team remove <user>` | removes access (every laptop of theirs), **rotates the team key**, re-grants everyone left |
 | `gai team init <owner>/claude-config` | publishes `~/claude-config` as a new encrypted repo |
 | `gai team sync pull` / `push` | used by Claude hooks |
 

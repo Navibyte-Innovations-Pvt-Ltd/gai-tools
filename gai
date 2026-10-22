@@ -861,6 +861,30 @@ ${_img_list}"
     if [[ -n "$_first_n" ]]; then
       _first_color="${_colors[$(( 10#$_first_n % 8 ))]}"
     fi
+    # issue % 8 alone clashes for issues 8 apart (#2603 and #2611 both
+    # yellow). claude-squad picks a colour no other tile of the project has
+    # and saves it as "tile:<tmux session>" in session-colors.json: use it.
+    # No pick yet → first colour from issue % 8 that no other tile of this
+    # project holds.
+    _cs_colors="${CLAUDE_SQUAD_HOME:-$HOME/.claude-squad}/session-colors.json"
+    _tile=$(tmux display-message -p -t "$TMUX_PANE" '#S' 2> /dev/null)
+    if [[ -n "$_first_color" && -n "$_tile" && -f "$_cs_colors" ]] && command -v jq > /dev/null 2>&1; then
+      _pick=$(jq -r --arg k "tile:$_tile" '.[$k] // empty' "$_cs_colors" 2> /dev/null)
+      if [[ -n "$_pick" ]]; then
+        _first_color="$_pick"
+      else
+        _used=$(jq -r --arg p "tile:${_tile%_i*}_i" --arg k "tile:$_tile" \
+          'to_entries[] | select((.key | startswith($p)) and .key != $k) | .value' "$_cs_colors" 2> /dev/null)
+        _start=$(( 10#$_first_n % 8 ))
+        for _o in 0 1 2 3 4 5 6 7; do
+          _c="${_colors[$(( (_start + _o) % 8 ))]}"
+          if ! printf '%s\n' "$_used" | grep -qx "$_c"; then
+            _first_color="$_c"
+            break
+          fi
+        done
+      fi
+    fi
   fi
   if [[ -n "$_first_color" ]]; then
     _pf=$(mktemp "${TMPDIR:-/tmp}/gai-prompt.XXXXXX")
