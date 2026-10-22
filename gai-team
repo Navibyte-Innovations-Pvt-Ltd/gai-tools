@@ -13,9 +13,10 @@
 #   gai team init <owner/name>  publish ~/claude-config as a new encrypted team repo
 #
 # Nobody pastes a key. Each person gets a personal age key (~/.gai/team-identity).
-# A newcomer's `gai update` pushes keys/<login>.pub; the next sync on any unlocked
-# teammate's laptop wraps the team key for that public key (keys/<login>.age) — only
-# for real repo collaborators — and the newcomer's next sync unlocks itself.
+# A newcomer's `gai update` adds this laptop's public key to keys/<login>.pub (one line
+# per laptop); the next sync on any unlocked teammate's laptop wraps the team key for
+# every key in it (keys/<login>.age, keys/<login>.granted records which) — only for real
+# repo collaborators — and the newcomer's next sync unlocks itself.
 #
 # Docs: docs/team.md
 
@@ -196,19 +197,22 @@ try_unlock() {
   return 1
 }
 
-# Push keys/<me>.pub so an unlocked teammate's next sync grants the key.
+# Add this laptop's key to keys/<me>.pub (one line per laptop, never replacing the
+# others) so an unlocked teammate's next sync grants the key to it.
 request_access() {
   local me pub
   me=$(my_login) || return 1
   ensure_identity || return 1
   pub=$(age-keygen -y "$IDENT")
   mkdir -p "$TEAM_DIR/keys"
-  if [[ "$(cat "$TEAM_DIR/keys/$me.pub" 2>/dev/null)" == "$pub" ]]; then
-    return 0
+  if ! grep -qxF "$pub" "$TEAM_DIR/keys/$me.pub" 2>/dev/null; then
+    printf '%s\n' "$pub" >> "$TEAM_DIR/keys/$me.pub"
+    git -C "$TEAM_DIR" add "keys/$me.pub"
+    tcommit "team: access request"
   fi
-  printf '%s\n' "$pub" > "$TEAM_DIR/keys/$me.pub"
-  git -C "$TEAM_DIR" add "keys/$me.pub"
-  tcommit "team: access request"
+  # A locked laptop never runs sync push: retry a request an earlier push lost.
+  [[ -n "$(git -C "$TEAM_DIR" rev-list "@{u}..HEAD" 2>/dev/null)" ]] || return 0
+  (cd "$TEAM_DIR" && pull_rebase 15) || return 1
   limit 20 git -C "$TEAM_DIR" push -q > /dev/null 2>&1
 }
 
@@ -216,13 +220,35 @@ is_collaborator() {
   gh api "repos/$(team_repo)/collaborators/$1" > /dev/null 2>&1
 }
 
-wrap_key_for() {  # $1 = login
+# Which keys keys/<login>.age was wrapped for: a hash of keys/<login>.pub.
+pub_hash() { git -C "$TEAM_DIR" hash-object "keys/$1.pub"; }
+
+# Before .granted existed: the .age was wrapped after the last change to the .pub.
+grant_current_in_git() {  # $1 = login
+  local p a
+  p=$(git -C "$TEAM_DIR" log -1 --format=%H -- "keys/$1.pub" 2>/dev/null)
+  a=$(git -C "$TEAM_DIR" log -1 --format=%H -- "keys/$1.age" 2>/dev/null)
+  [[ -n "$p" && -n "$a" ]] && git -C "$TEAM_DIR" merge-base --is-ancestor "$p" "$a"
+}
+
+# A laptop added to keys/<login>.pub after the last grant isn't in the .age yet.
+needs_grant() {  # $1 = login
+  [[ -f "$TEAM_DIR/keys/$1.age" ]] || return 0
+  if [[ -f "$TEAM_DIR/keys/$1.granted" ]]; then
+    [[ "$(cat "$TEAM_DIR/keys/$1.granted")" != "$(pub_hash "$1")" ]]
+    return
+  fi
+  ! grant_current_in_git "$1"
+}
+
+wrap_key_for() {  # $1 = login; wraps for every laptop key in keys/<login>.pub
   local tmp
   tmp=$(mktemp)
   git -C "$TEAM_DIR" crypt export-key "$tmp" > /dev/null 2>&1
-  age -r "$(cat "$TEAM_DIR/keys/$1.pub")" -o "$TEAM_DIR/keys/$1.age" "$tmp"
+  age -R "$TEAM_DIR/keys/$1.pub" -o "$TEAM_DIR/keys/$1.age" "$tmp"
   local rc=$?
   rm -f "$tmp"
+  [[ $rc == 0 ]] && pub_hash "$1" > "$TEAM_DIR/keys/$1.granted"
   return $rc
 }
 
@@ -230,22 +256,31 @@ wrap_key_for() {  # $1 = login
 grant_pending() {
   unlocked || return 0
   [[ -d "$TEAM_DIR/keys" ]] || return 0
-  local pub user granted=""
+  local pub user granted="" recorded=""
   for pub in "$TEAM_DIR"/keys/*.pub; do
     [[ -f "$pub" ]] || continue
     user=$(basename "$pub" .pub)
-    [[ -f "$TEAM_DIR/keys/$user.age" ]] && continue
+    if ! needs_grant "$user"; then
+      # Grant from before .granted existed: record it, leave the .age bytes alone.
+      if [[ ! -f "$TEAM_DIR/keys/$user.granted" ]]; then
+        pub_hash "$user" > "$TEAM_DIR/keys/$user.granted"
+        git -C "$TEAM_DIR" add "keys/$user.granted"
+        recorded=1
+      fi
+      continue
+    fi
     if ! is_collaborator "$user"; then
       continue
     fi
     if wrap_key_for "$user"; then
-      git -C "$TEAM_DIR" add "keys/$user.age"
+      git -C "$TEAM_DIR" add "keys/$user.age" "keys/$user.granted"
       granted="$granted $user"
     fi
   done
-  [[ -n "$granted" ]] || return 0
+  [[ -n "$granted$recorded" ]] || return 0
   tcommit "team: key granted"
   limit 20 git -C "$TEAM_DIR" push -q > /dev/null 2>&1
+  [[ -n "$granted" ]] || return 0
   notice "gai team: gave the team key to$granted (they unlock on their next session)."
   return 0
 }
@@ -608,7 +643,7 @@ PY
 }
 
 cmd_status() {
-  local repo me
+  local repo me mine
   repo=$(cat "$CONF" 2>/dev/null) || repo=""
   if [[ -z "$repo" ]]; then
     say "Not in a team. 'gai update' sets it up once a 'claude-config' repo exists in your org."
@@ -616,14 +651,30 @@ cmd_status() {
   fi
   me=$(my_login 2>/dev/null) || me="?"
   say "Team repo : $repo  (~/claude-config)"
-  if unlocked; then say "Unlocked  : yes"; else say "Unlocked  : no (waiting for a teammate to grant the key)"; fi
+  mine=$(age-keygen -y "$IDENT" 2>/dev/null) || mine=""
+  if unlocked; then
+    say "Unlocked  : yes"
+  elif [[ -z "$mine" ]] || ! grep -qxF "$mine" "$TEAM_DIR/keys/$me.pub" 2>/dev/null; then
+    say "Unlocked  : no (this laptop hasn't asked for access yet — run gai update)"
+  elif needs_grant "$me"; then
+    say "Unlocked  : no (waiting for a teammate's next session to grant this laptop's key)"
+  else
+    say "Unlocked  : no (keys/$me.age was granted to this laptop but doesn't open — run gai update)"
+  fi
   if [[ -d "$TEAM_DIR/keys" ]]; then
-    local f u
+    local f u n
     say "Members   :"
     for f in "$TEAM_DIR"/keys/*.pub; do
       [[ -f "$f" ]] || continue
       u=$(basename "$f" .pub)
-      if [[ -f "$TEAM_DIR/keys/$u.age" ]]; then say "  ✓ $u"; else say "  … $u (asked for access)"; fi
+      n=$(grep -c . "$f")
+      if [[ ! -f "$TEAM_DIR/keys/$u.age" ]]; then
+        say "  … $u (asked for access)"
+      elif needs_grant "$u"; then
+        say "  ✓ $u (a new laptop is waiting for the key)"
+      else
+        say "  ✓ $u ($n laptop$( [[ $n == 1 ]] || echo s))"
+      fi
     done
   fi
   [[ "$me" != "?" ]] && say "You       : $me"
@@ -649,7 +700,7 @@ cmd_remove() {
   unlocked || { say "Unlock first (gai update)."; return 1; }
   gh api -X DELETE "repos/$repo/collaborators/$user" > /dev/null 2>&1
   cd "$TEAM_DIR" || return 1
-  git rm -q -f --ignore-unmatch "keys/$user.pub" "keys/$user.age"
+  git rm -q -f --ignore-unmatch "keys/$user.pub" "keys/$user.age" "keys/$user.granted"
   rotate_key
   say "✓ $user removed and the team key rotated. They keep whatever they already pulled; new changes are closed to them."
 }
