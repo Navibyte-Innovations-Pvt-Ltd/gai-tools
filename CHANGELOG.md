@@ -9,7 +9,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) — [Semantic V
 ## [Unreleased]
 ### Added
 
-- feat(gai): Ollama now unloads the commit model 30s after the last request
+- feat(gai): Ollama now unloads the commit model 5s after the last request
   instead of its 5m default, so about 2.4 GB of RAM comes back between commit
   bursts. Set `$GAI_KEEP_ALIVE` (e.g. `5m`, `0`) to change it.
 - feat(issue): `gai issue` starts Claude with the model its issue's label asks
@@ -103,6 +103,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) — [Semantic V
 
 ### Fixed
 
+- fix(gai): the secret check no longer blocks words ending in `sk-` (e.g.
+  `task-…`, `desk-…`); a real `sk-` key still needs a non-word character
+  before it. The redundant `sk-ant-` pattern is folded into `sk-`.
 - fix(gai): a model reply wrapped in an unclosed ```` ```markdown ```` fence no
   longer hides the PR's `Closes` block. GitHub ignores closing keywords inside
   code, so practise_stack PR #1828 lost all seven linked issues while `gai issue`
