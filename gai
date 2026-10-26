@@ -21,7 +21,7 @@ if ! [[ "$MAX_DIFF_CHARS" =~ ^[1-9][0-9]*$ ]]; then MAX_DIFF_CHARS=12000; fi
 GEN_FAIL="" GEN_SECS=0 GEN_TIMED_OUT=false
 OLLAMA_URL="http://localhost:11434/api/generate"
 # How long Ollama keeps the model in RAM after a request (Ollama default is 5m).
-KEEP_ALIVE="${GAI_KEEP_ALIVE:-30s}"
+KEEP_ALIVE="${GAI_KEEP_ALIVE:-5s}"
 DRY_RUN=false
 FORCE=false
 MODE="staged"
