@@ -20,6 +20,8 @@ MAX_DIFF_CHARS="${GAI_MAX_DIFF_CHARS:-12000}"
 if ! [[ "$MAX_DIFF_CHARS" =~ ^[1-9][0-9]*$ ]]; then MAX_DIFF_CHARS=12000; fi
 GEN_FAIL="" GEN_SECS=0 GEN_TIMED_OUT=false
 OLLAMA_URL="http://localhost:11434/api/generate"
+# How long Ollama keeps the model in RAM after a request (Ollama default is 5m).
+KEEP_ALIVE="${GAI_KEEP_ALIVE:-30s}"
 DRY_RUN=false
 FORCE=false
 MODE="staged"
@@ -109,7 +111,7 @@ _gai_ollama_gen() {
   fi
   if ! _raw=$("${_curl[@]}" "$OLLAMA_URL" \
     -H "Content-Type: application/json" \
-    -d "{\"model\":\"$MODEL\",\"prompt\":$_escaped,\"stream\":false,\"options\":{\"num_ctx\":${GAI_NUM_CTX:-8192}}}"); then
+    -d "{\"model\":\"$MODEL\",\"prompt\":$_escaped,\"stream\":false,\"keep_alive\":\"$KEEP_ALIVE\",\"options\":{\"num_ctx\":${GAI_NUM_CTX:-8192}}}"); then
     return 1
   fi
   printf '%s' "$_raw" | python3 -c "
@@ -1630,6 +1632,7 @@ print(pick['browser_download_url'])")
       echo "  remove       : uninstall gai/gai-watch/gai-db/gai-team (alias: uninstall)"
       echo ""
       echo "Model: \$GAI_MODEL (default: $MODEL)"
+      echo "Keep model in RAM after use: \$GAI_KEEP_ALIVE (default: $KEEP_ALIVE)"
       echo "Secret allowlist: \$GAI_ALLOW_PATHS (colon-separated globs) or 'allow=<glob>' lines in <repo>/.gairc"
       echo "Requires: ollama running + model pulled"
       echo "  brew install ollama && ollama pull $MODEL"
@@ -2173,7 +2176,7 @@ $diff"
   _t0=$(date +%s)
   response=$(curl -s --connect-timeout 10 --max-time "$COMMIT_TIMEOUT" "$OLLAMA_URL" \
     -H "Content-Type: application/json" \
-    -d "{\"model\":\"$MODEL\",\"prompt\":$escaped,\"stream\":false,\"options\":{\"num_predict\":80}}") || _rc=$?
+    -d "{\"model\":\"$MODEL\",\"prompt\":$escaped,\"stream\":false,\"keep_alive\":\"$KEEP_ALIVE\",\"options\":{\"num_predict\":80}}") || _rc=$?
   GEN_SECS=$(( $(date +%s) - _t0 ))
   if [[ $_rc -eq 28 ]]; then
     GEN_FAIL="Ollama timed out after ${COMMIT_TIMEOUT}s (GAI_COMMIT_TIMEOUT)"
