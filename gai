@@ -21,7 +21,7 @@ if ! [[ "$MAX_DIFF_CHARS" =~ ^[1-9][0-9]*$ ]]; then MAX_DIFF_CHARS=12000; fi
 GEN_FAIL="" GEN_SECS=0 GEN_TIMED_OUT=false
 OLLAMA_URL="http://localhost:11434/api/generate"
 # How long Ollama keeps the model in RAM after a request (Ollama default is 5m).
-KEEP_ALIVE="${GAI_KEEP_ALIVE:-30s}"
+KEEP_ALIVE="${GAI_KEEP_ALIVE:-5s}"
 DRY_RUN=false
 FORCE=false
 MODE="staged"
@@ -2096,8 +2096,7 @@ scan_diff_secrets() {
     -e '-----BEGIN [A-Z ]*PRIVATE KEY-----' \
     -e 'AKIA[0-9A-Z]{16}' \
     -e 'ASIA[0-9A-Z]{16}' \
-    -e 'sk-[A-Za-z0-9_-]{24,}' \
-    -e 'sk-ant-[A-Za-z0-9_-]{24,}' \
+    -e '(^|[^A-Za-z0-9_-])sk-[A-Za-z0-9_-]{24,}' \
     -e 'ghp_[A-Za-z0-9]{36}' \
     -e 'gho_[A-Za-z0-9]{36}' \
     -e 'github_pat_[A-Za-z0-9_]{40,}' \
@@ -2110,6 +2109,7 @@ scan_diff_secrets() {
     2>/dev/null | head -1 || true)
 
   [[ -z "$hit" ]] && return 1
+  [[ "$hit" == ?sk-* ]] && hit="${hit:1}"  # drop the boundary character before an sk- key
   _SECRET_REASON="added line contains '${hit:0:12}…' — looks like a live credential"
   return 0
 }
