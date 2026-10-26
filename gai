@@ -2096,8 +2096,7 @@ scan_diff_secrets() {
     -e '-----BEGIN [A-Z ]*PRIVATE KEY-----' \
     -e 'AKIA[0-9A-Z]{16}' \
     -e 'ASIA[0-9A-Z]{16}' \
-    -e 'sk-[A-Za-z0-9_-]{24,}' \
-    -e 'sk-ant-[A-Za-z0-9_-]{24,}' \
+    -e '(^|[^A-Za-z0-9_-])sk-[A-Za-z0-9_-]{24,}' \
     -e 'ghp_[A-Za-z0-9]{36}' \
     -e 'gho_[A-Za-z0-9]{36}' \
     -e 'github_pat_[A-Za-z0-9_]{40,}' \
@@ -2110,6 +2109,7 @@ scan_diff_secrets() {
     2>/dev/null | head -1 || true)
 
   [[ -z "$hit" ]] && return 1
+  [[ "$hit" == ?sk-* ]] && hit="${hit:1}"  # drop the boundary character before an sk- key
   _SECRET_REASON="added line contains '${hit:0:12}…' — looks like a live credential"
   return 0
 }
