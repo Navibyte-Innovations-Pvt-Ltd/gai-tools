@@ -9,6 +9,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) — [Semantic V
 ## [Unreleased]
 ### Added
 
+- feat(gai): Ollama now unloads the commit model 30s after the last request
+  instead of its 5m default, so about 2.4 GB of RAM comes back between commit
+  bursts. Set `$GAI_KEEP_ALIVE` (e.g. `5m`, `0`) to change it.
 - feat(issue): `gai issue` starts Claude with the model its issue's label asks
   for — `model:sonnet` → `--model sonnet`, `model:opus` → `--model 'opus[1m]'`
   (Glitchgrab triage, glitchgrab#576). Labels are read live; with several issues
