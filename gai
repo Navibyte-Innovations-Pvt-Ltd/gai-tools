@@ -20,6 +20,8 @@ MAX_DIFF_CHARS="${GAI_MAX_DIFF_CHARS:-12000}"
 if ! [[ "$MAX_DIFF_CHARS" =~ ^[1-9][0-9]*$ ]]; then MAX_DIFF_CHARS=12000; fi
 GEN_FAIL="" GEN_SECS=0 GEN_TIMED_OUT=false
 OLLAMA_URL="http://localhost:11434/api/generate"
+# How long Ollama keeps the model in RAM after a request (Ollama default is 5m).
+KEEP_ALIVE="${GAI_KEEP_ALIVE:-5s}"
 DRY_RUN=false
 FORCE=false
 MODE="staged"
@@ -109,7 +111,7 @@ _gai_ollama_gen() {
   fi
   if ! _raw=$("${_curl[@]}" "$OLLAMA_URL" \
     -H "Content-Type: application/json" \
-    -d "{\"model\":\"$MODEL\",\"prompt\":$_escaped,\"stream\":false,\"options\":{\"num_ctx\":${GAI_NUM_CTX:-8192}}}"); then
+    -d "{\"model\":\"$MODEL\",\"prompt\":$_escaped,\"stream\":false,\"keep_alive\":\"$KEEP_ALIVE\",\"options\":{\"num_ctx\":${GAI_NUM_CTX:-8192}}}"); then
     return 1
   fi
   printf '%s' "$_raw" | python3 -c "
@@ -1630,6 +1632,7 @@ print(pick['browser_download_url'])")
       echo "  remove       : uninstall gai/gai-watch/gai-db/gai-team (alias: uninstall)"
       echo ""
       echo "Model: \$GAI_MODEL (default: $MODEL)"
+      echo "Keep model in RAM after use: \$GAI_KEEP_ALIVE (default: $KEEP_ALIVE)"
       echo "Secret allowlist: \$GAI_ALLOW_PATHS (colon-separated globs) or 'allow=<glob>' lines in <repo>/.gairc"
       echo "Requires: ollama running + model pulled"
       echo "  brew install ollama && ollama pull $MODEL"
@@ -1795,18 +1798,62 @@ if [[ "${_gai_pr:-false}" == "true" ]]; then
   fi
 
   if [[ -z "$PR_BODY" ]]; then
+    # A long-lived branch (dev after squash merges) can carry ~1000 commits;
+    # listing them all blows GitHub's 65536-char body limit.
     _pr_bullets=""
+    _pr_count=0
+    _pr_total=$(grep -c . <<< "$PR_COMMITS" || true)
     while IFS= read -r _line; do
+      [[ -z "$_line" ]] && continue
+      (( _pr_count++ >= 50 )) && break
       _pr_bullets+="- ${_line}"$'\n'
     done <<< "$PR_COMMITS"
+    if (( _pr_total > 50 )); then
+      _pr_bullets+="- …and $(( _pr_total - 50 )) more commits"$'\n'
+    fi
     PR_BODY="## What and why
 ${_pr_bullets}
 ## Changes
 $PR_DIFF_STAT"
   fi
 
+  # GitHub rejects bodies over 65536 chars ("Body is too long").
+  if (( ${#PR_BODY} > 60000 )); then
+    PR_BODY="${PR_BODY:0:60000}
+
+…(truncated: body was over GitHub's 65536-character limit)"
+  fi
+
   echo "→ Pushing branch '$CURRENT_BRANCH'…"
-  git push -u origin "$CURRENT_BRANCH"
+  # A merged PR often leaves its branch on the remote (GitHub doesn't always
+  # delete it). A fresh local branch then can't fast-forward onto it. Replace
+  # it only when everything on it is already in the base branch: merging it
+  # into base would produce base's own tree.
+  _pr_push_args=()
+  _pr_remote_sha=$(git ls-remote origin "refs/heads/$CURRENT_BRANCH" 2>/dev/null | cut -f1 || true)
+  if [[ -n "$_pr_remote_sha" ]]; then
+    git fetch origin "$CURRENT_BRANCH" --quiet 2>/dev/null || true
+    if ! git merge-base --is-ancestor "$_pr_remote_sha" HEAD 2>/dev/null; then
+      _pr_base_tree=$(git rev-parse "origin/$BASE_BRANCH^{tree}" 2>/dev/null || true)
+      _pr_merged_tree=$(git merge-tree --write-tree "origin/$BASE_BRANCH" "$_pr_remote_sha" 2>/dev/null | head -1 || true)
+      # An open PR on that branch is live work (an empty issue-tracking commit
+      # also "merges" to base's tree) — never force over it.
+      _pr_open_on_remote=$(gh pr list --head "$CURRENT_BRANCH" --state open --json number --jq '.[0].number // empty' 2>/dev/null || true)
+      if [[ -n "$_pr_open_on_remote" ]]; then
+        echo "error: remote '$CURRENT_BRANCH' belongs to open PR #${_pr_open_on_remote} and your local '$CURRENT_BRANCH' doesn't include it." >&2
+        echo "  Run 'git pull origin $CURRENT_BRANCH' to bring it in, then run this again." >&2
+        exit 1
+      elif [[ -n "$_pr_base_tree" && "$_pr_base_tree" == "$_pr_merged_tree" ]]; then
+        echo "→ Remote '$CURRENT_BRANCH' is left over from a merged PR (all of it is in '$BASE_BRANCH') — replacing it."
+        _pr_push_args=(--force-with-lease="refs/heads/$CURRENT_BRANCH:$_pr_remote_sha")
+      else
+        echo "error: remote '$CURRENT_BRANCH' has work that is not in '$BASE_BRANCH' and your local '$CURRENT_BRANCH' doesn't include it." >&2
+        echo "  Run 'git pull origin $CURRENT_BRANCH' to bring it in, then run this again." >&2
+        exit 1
+      fi
+    fi
+  fi
+  git push -u ${_pr_push_args[@]+"${_pr_push_args[@]}"} origin "$CURRENT_BRANCH"
 
   echo "→ Creating PR…"
   # Resolve the canonical repo from GitHub, not from the remote URL: a repo that
@@ -2093,8 +2140,7 @@ scan_diff_secrets() {
     -e '-----BEGIN [A-Z ]*PRIVATE KEY-----' \
     -e 'AKIA[0-9A-Z]{16}' \
     -e 'ASIA[0-9A-Z]{16}' \
-    -e 'sk-[A-Za-z0-9_-]{24,}' \
-    -e 'sk-ant-[A-Za-z0-9_-]{24,}' \
+    -e '(^|[^A-Za-z0-9_-])sk-[A-Za-z0-9_-]{24,}' \
     -e 'ghp_[A-Za-z0-9]{36}' \
     -e 'gho_[A-Za-z0-9]{36}' \
     -e 'github_pat_[A-Za-z0-9_]{40,}' \
@@ -2107,6 +2153,7 @@ scan_diff_secrets() {
     2>/dev/null | head -1 || true)
 
   [[ -z "$hit" ]] && return 1
+  [[ "$hit" == ?sk-* ]] && hit="${hit:1}"  # drop the boundary character before an sk- key
   _SECRET_REASON="added line contains '${hit:0:12}…' — looks like a live credential"
   return 0
 }
@@ -2173,7 +2220,7 @@ $diff"
   _t0=$(date +%s)
   response=$(curl -s --connect-timeout 10 --max-time "$COMMIT_TIMEOUT" "$OLLAMA_URL" \
     -H "Content-Type: application/json" \
-    -d "{\"model\":\"$MODEL\",\"prompt\":$escaped,\"stream\":false,\"options\":{\"num_predict\":80}}") || _rc=$?
+    -d "{\"model\":\"$MODEL\",\"prompt\":$escaped,\"stream\":false,\"keep_alive\":\"$KEEP_ALIVE\",\"options\":{\"num_predict\":80}}") || _rc=$?
   GEN_SECS=$(( $(date +%s) - _t0 ))
   if [[ $_rc -eq 28 ]]; then
     GEN_FAIL="Ollama timed out after ${COMMIT_TIMEOUT}s (GAI_COMMIT_TIMEOUT)"
