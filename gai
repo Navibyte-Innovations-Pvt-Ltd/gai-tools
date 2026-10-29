@@ -1765,8 +1765,25 @@ if [[ "${_gai_pr:-false}" == "true" ]]; then
 
   if [[ -n "$_pr_branch" ]]; then
     if git show-ref --verify --quiet "refs/heads/$_pr_branch"; then
-      echo "→ Branch '$_pr_branch' already exists — switching to it."
-      git checkout "$_pr_branch"
+      # A branch left over from a squash-merged PR holds nothing new, and
+      # switching to it would leave this branch's new commits out of the PR.
+      # Move it here instead when merging it into HEAD changes nothing.
+      _pr_old_sha=$(git rev-parse "$_pr_branch")
+      _pr_head_tree=$(git rev-parse "HEAD^{tree}")
+      _pr_join_tree=$(git merge-tree --write-tree HEAD "$_pr_branch" 2>/dev/null | head -1 || true)
+      if git merge-base --is-ancestor HEAD "$_pr_branch"; then
+        echo "→ Branch '$_pr_branch' already exists — switching to it."
+        git checkout "$_pr_branch"
+      elif [[ "$_pr_join_tree" == "$_pr_head_tree" ]]; then
+        echo "→ Branch '$_pr_branch' is left over from a merged PR — moving it to this commit (was ${_pr_old_sha:0:8})."
+        git checkout -B "$_pr_branch"
+      else
+        echo "→ Branch '$_pr_branch' already exists with its own work — switching to it."
+        if [[ -n "$(git log --oneline "$_pr_branch"..HEAD 2>/dev/null | head -1)" ]]; then
+          echo "  warning: commits on '$(git branch --show-current)' that aren't on '$_pr_branch' won't be in this PR." >&2
+        fi
+        git checkout "$_pr_branch"
+      fi
     else
       echo "→ Creating branch '$_pr_branch'…"
       git checkout -b "$_pr_branch"
