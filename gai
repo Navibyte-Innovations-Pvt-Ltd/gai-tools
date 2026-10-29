@@ -1798,18 +1798,62 @@ if [[ "${_gai_pr:-false}" == "true" ]]; then
   fi
 
   if [[ -z "$PR_BODY" ]]; then
+    # A long-lived branch (dev after squash merges) can carry ~1000 commits;
+    # listing them all blows GitHub's 65536-char body limit.
     _pr_bullets=""
+    _pr_count=0
+    _pr_total=$(grep -c . <<< "$PR_COMMITS" || true)
     while IFS= read -r _line; do
+      [[ -z "$_line" ]] && continue
+      (( _pr_count++ >= 50 )) && break
       _pr_bullets+="- ${_line}"$'\n'
     done <<< "$PR_COMMITS"
+    if (( _pr_total > 50 )); then
+      _pr_bullets+="- …and $(( _pr_total - 50 )) more commits"$'\n'
+    fi
     PR_BODY="## What and why
 ${_pr_bullets}
 ## Changes
 $PR_DIFF_STAT"
   fi
 
+  # GitHub rejects bodies over 65536 chars ("Body is too long").
+  if (( ${#PR_BODY} > 60000 )); then
+    PR_BODY="${PR_BODY:0:60000}
+
+…(truncated: body was over GitHub's 65536-character limit)"
+  fi
+
   echo "→ Pushing branch '$CURRENT_BRANCH'…"
-  git push -u origin "$CURRENT_BRANCH"
+  # A merged PR often leaves its branch on the remote (GitHub doesn't always
+  # delete it). A fresh local branch then can't fast-forward onto it. Replace
+  # it only when everything on it is already in the base branch: merging it
+  # into base would produce base's own tree.
+  _pr_push_args=()
+  _pr_remote_sha=$(git ls-remote origin "refs/heads/$CURRENT_BRANCH" 2>/dev/null | cut -f1 || true)
+  if [[ -n "$_pr_remote_sha" ]]; then
+    git fetch origin "$CURRENT_BRANCH" --quiet 2>/dev/null || true
+    if ! git merge-base --is-ancestor "$_pr_remote_sha" HEAD 2>/dev/null; then
+      _pr_base_tree=$(git rev-parse "origin/$BASE_BRANCH^{tree}" 2>/dev/null || true)
+      _pr_merged_tree=$(git merge-tree --write-tree "origin/$BASE_BRANCH" "$_pr_remote_sha" 2>/dev/null | head -1 || true)
+      # An open PR on that branch is live work (an empty issue-tracking commit
+      # also "merges" to base's tree) — never force over it.
+      _pr_open_on_remote=$(gh pr list --head "$CURRENT_BRANCH" --state open --json number --jq '.[0].number // empty' 2>/dev/null || true)
+      if [[ -n "$_pr_open_on_remote" ]]; then
+        echo "error: remote '$CURRENT_BRANCH' belongs to open PR #${_pr_open_on_remote} and your local '$CURRENT_BRANCH' doesn't include it." >&2
+        echo "  Run 'git pull origin $CURRENT_BRANCH' to bring it in, then run this again." >&2
+        exit 1
+      elif [[ -n "$_pr_base_tree" && "$_pr_base_tree" == "$_pr_merged_tree" ]]; then
+        echo "→ Remote '$CURRENT_BRANCH' is left over from a merged PR (all of it is in '$BASE_BRANCH') — replacing it."
+        _pr_push_args=(--force-with-lease="refs/heads/$CURRENT_BRANCH:$_pr_remote_sha")
+      else
+        echo "error: remote '$CURRENT_BRANCH' has work that is not in '$BASE_BRANCH' and your local '$CURRENT_BRANCH' doesn't include it." >&2
+        echo "  Run 'git pull origin $CURRENT_BRANCH' to bring it in, then run this again." >&2
+        exit 1
+      fi
+    fi
+  fi
+  git push -u ${_pr_push_args[@]+"${_pr_push_args[@]}"} origin "$CURRENT_BRANCH"
 
   echo "→ Creating PR…"
   # Resolve the canonical repo from GitHub, not from the remote URL: a repo that
