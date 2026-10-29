@@ -314,8 +314,11 @@ issue was filed still counts. Glitchgrab's triage puts exactly one of
 |---|---|---|
 | `model:sonnet` | `claude --model sonnet` | `model: sonnet (label model:sonnet)` |
 | `model:opus` | `claude --model 'opus[1m]'` (1M context) | `model: opus[1m] (label model:opus)` |
-| neither | `claude` (its own default) | `model: claude default (no model:* label)` |
-| `gh` fails | `claude` (its own default) | `model: claude default (could not read issue labels)` |
+| neither | `claude --model sonnet` | `model: sonnet (no model:* label; add model:opus to override)` |
+| `gh` fails | `claude --model sonnet` | `model: sonnet (could not read issue labels)` |
+
+Unlabelled issues are the ones triage never saw (CI failures, follow-ups, SDK
+upgrades, SEO), so they get sonnet rather than claude's own default (opus).
 
 With several issues in one session the hardest one wins: any `model:opus`
 means `opus[1m]`, and the line names the issue it came from (`… on #456`). A label
