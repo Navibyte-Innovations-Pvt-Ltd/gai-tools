@@ -681,7 +681,7 @@ ${_closes_block}"
 # label can be added or corrected after the issue was filed. Sets
 # _claude_model ("" = don't pass --model, claude keeps its own default) and
 # prints one line saying which and why. Never fails: no label, no gh, no
-# network all fall back to claude's default.
+# network all fall back to sonnet.
 _gai_issue_claude_model() {
   _claude_model=""
 
@@ -735,9 +735,14 @@ _gai_issue_claude_model() {
       echo "model: ${_claude_model} (label ${_label})"
     fi
   elif [[ "$_failed" == "true" ]]; then
-    echo "model: claude default (could not read issue labels)"
+    _claude_model="sonnet"
+    echo "model: sonnet (could not read issue labels)"
   else
-    echo "model: claude default (no model:* label)"
+    # Unlabelled = never triaged: CI failures, follow-ups, SDK upgrades, SEO.
+    # claude's own default is opus, which spent credit on these small jobs.
+    # Add model:opus to the issue to override.
+    _claude_model="sonnet"
+    echo "model: sonnet (no model:* label; add model:opus to override)"
   fi
   return 0
 }
@@ -1618,7 +1623,7 @@ print(pick['browser_download_url'])")
       echo "                 --remove (-r) detaches instead: drops that issue's 'Closes #N',"
       echo "                 keeps the rest, and rewrites the title and body from what is left."
       echo "                 Claude model: label model:sonnet -> sonnet, model:opus -> opus[1m];"
-      echo "                 \$GAI_CLAUDE_MODEL overrides (default = Claude's own default)."
+      echo "                 no label -> sonnet. \$GAI_CLAUDE_MODEL overrides ('default' = Claude's own)."
       echo "  db           : menu — copy / verify / unfreeze a Postgres database"
       echo "  db copy      : copy one Postgres database into another — asks for the new URL,"
       echo "                 then the old one; optional freeze, all-or-nothing restore, row-count"
