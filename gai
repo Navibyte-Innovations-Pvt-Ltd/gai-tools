@@ -583,7 +583,7 @@ _gai_pr_write() {
   if [[ "$_issue_dry_run" != "true" ]]; then
     _gai_pr_lock
   fi
-  _fresh_json=$(gh pr view "$_pr_num" --repo "$_issue_repo" --json title,body 2> /dev/null || true)
+  _fresh_json=$(_gai_gh_read pr view "$_pr_num" --repo "$_issue_repo" --json title,body 2> /dev/null || true)
   if [[ -n "$_fresh_json" ]]; then
     _fresh_body=$(echo "$_fresh_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('body') or '')")
     _fresh_nums=$(printf '%s\n' "$_fresh_body" | grep -ioE "$_close_re" | grep -oE '[0-9]+' || true)
@@ -676,6 +676,31 @@ ${_closes_block}"
 
 # ── issue subcommand ──────────────────────────────────────────────────────────
 
+# gh for reads, retried on network errors only: a dial timeout on the last fetch
+# of "gai issue" threw away the whole run (practise_stack #2906, a dead tile).
+# A real failure (issue not found, no access) still fails on the first try.
+_gai_gh_read() {
+  local _err _out _rc _try _wait
+  _err=$(mktemp)
+  for _try in 1 2 3 4; do
+    _rc=0
+    _out=$(gh "$@" 2> "$_err") || _rc=$?
+    if [[ "$_rc" -eq 0 ]]; then
+      rm -f "$_err"
+      printf '%s\n' "$_out"
+      return 0
+    fi
+    grep -qiE 'i/o timeout|dial tcp|error connecting to|connection (reset|refused)|tls handshake|no such host|network is unreachable|client\.timeout|unexpected eof|HTTP 50[234]' "$_err" || break
+    [[ "$_try" -eq 4 ]] && break
+    _wait=$((_try * 5))
+    echo "  … GitHub unreachable — retry ${_try}/3 in ${_wait}s" >&2
+    sleep "$_wait"
+  done
+  cat "$_err" >&2
+  rm -f "$_err"
+  return "$_rc"
+}
+
 # Picks the Claude model for the issue session. Glitchgrab's triage puts one of
 # model:sonnet / model:opus on each issue it classifies; read live, because the
 # label can be added or corrected after the issue was filed. Sets
@@ -699,7 +724,7 @@ _gai_issue_claude_model() {
 
   local _n _labels _l _opus_on="" _sonnet_on="" _failed=false
   for _n in $_issue_nums; do
-    if ! _labels=$(gh issue view "$_n" --repo "$_issue_repo" \
+    if ! _labels=$(_gai_gh_read issue view "$_n" --repo "$_issue_repo" \
       --json labels --jq '.labels[].name' 2> /dev/null); then
       _failed=true
       continue
@@ -775,7 +800,7 @@ _gai_issue_claude_session() {
   echo "→ Fetching ${_issue_label} context…"
   local _n _one _issue_ctx=""
   for _n in $_issue_nums; do
-    _one=$(gh issue view "$_n" --repo "$_issue_repo" \
+    _one=$(_gai_gh_read issue view "$_n" --repo "$_issue_repo" \
       --json title,body,labels,comments \
       --jq '
         "Title: \(.title)",
@@ -1060,7 +1085,7 @@ if [[ "${1:-}" == "issue" ]]; then
   _pr_list=()
   while IFS= read -r _line; do
     [[ -n "$_line" ]] && _pr_list+=("$_line")
-  done < <(gh pr list --repo "$_issue_repo" --state open --json number,title,closingIssuesReferences,author \
+  done < <(_gai_gh_read pr list --repo "$_issue_repo" --state open --json number,title,closingIssuesReferences,author \
     --jq '.[] | select(((.author.is_bot // false) or (.author.login | startswith("app/")) or (.author.login | endswith("[bot]"))) | not)
       | "\(.number)|\(.closingIssuesReferences | length)|\(.title)"')
 
@@ -1276,7 +1301,7 @@ if [[ "${1:-}" == "issue" ]]; then
   # Everything below is sourced from the PR itself, never from local git: the
   # selected PR may belong to a branch that is not checked out here, and
   # describing HEAD's commits in someone else's PR would be worse than useless.
-  _pr_json=$(gh pr view "$_pr_num" --repo "$_issue_repo" --json headRefName,title,body,commits)
+  _pr_json=$(_gai_gh_read pr view "$_pr_num" --repo "$_issue_repo" --json headRefName,title,body,commits)
 
   _pr_body=$(echo "$_pr_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('body') or '')")
   _pr_head=$(echo "$_pr_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('headRefName') or '')")
