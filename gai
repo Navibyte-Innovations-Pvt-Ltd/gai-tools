@@ -1738,9 +1738,22 @@ if [[ "${_gai_pr:-false}" == "true" ]]; then
   # Count against the branch we are going to end up on, not the one we are on
   # now: an existing 'dev' can already be ahead while HEAD on main is not. The
   # switch itself has to wait until every question is answered.
+  # A leftover branch is about to be moved here, so what counts is HEAD: its old
+  # squash-merged commits are gone by push time, and counting them skips the
+  # empty commit and ends in "No commits between main and dev".
   _count_ref="HEAD"
+  _pr_move_here=false
   if [[ -n "$_pr_branch" ]] && git show-ref --verify --quiet "refs/heads/$_pr_branch"; then
     _count_ref="refs/heads/$_pr_branch"
+    if ! git merge-base --is-ancestor HEAD "$_pr_branch"; then
+      # A branch left over from a squash-merged PR holds nothing new: merging it
+      # into HEAD changes nothing.
+      _pr_join_tree=$(git merge-tree --write-tree HEAD "$_pr_branch" 2>/dev/null | head -1 || true)
+      if [[ "$_pr_join_tree" == "$(git rev-parse "HEAD^{tree}")" ]]; then
+        _pr_move_here=true
+        _count_ref="HEAD"
+      fi
+    fi
   fi
   PR_COMMITS=$(git log "origin/${BASE_BRANCH}..${_count_ref}" --oneline 2>/dev/null)
 
@@ -1795,16 +1808,13 @@ if [[ "${_gai_pr:-false}" == "true" ]]; then
 
   if [[ -n "$_pr_branch" ]]; then
     if git show-ref --verify --quiet "refs/heads/$_pr_branch"; then
-      # A branch left over from a squash-merged PR holds nothing new, and
-      # switching to it would leave this branch's new commits out of the PR.
-      # Move it here instead when merging it into HEAD changes nothing.
+      # Switching to a leftover branch would leave this branch's new commits out
+      # of the PR, so it moves here instead.
       _pr_old_sha=$(git rev-parse "$_pr_branch")
-      _pr_head_tree=$(git rev-parse "HEAD^{tree}")
-      _pr_join_tree=$(git merge-tree --write-tree HEAD "$_pr_branch" 2>/dev/null | head -1 || true)
       if git merge-base --is-ancestor HEAD "$_pr_branch"; then
         echo "→ Branch '$_pr_branch' already exists — switching to it."
         git checkout "$_pr_branch"
-      elif [[ "$_pr_join_tree" == "$_pr_head_tree" ]]; then
+      elif [[ "$_pr_move_here" == "true" ]]; then
         echo "→ Branch '$_pr_branch' is left over from a merged PR — moving it to this commit (was ${_pr_old_sha:0:8})."
         git checkout -B "$_pr_branch"
       else
