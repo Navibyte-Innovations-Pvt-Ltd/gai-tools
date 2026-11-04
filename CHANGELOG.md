@@ -7,6 +7,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) — [Semantic V
 ---
 
 ## [Unreleased]
+### Fixed
+
+- fix(issue): the `gai issue` PR menu shows author, branch and last commit date,
+  lists the checked-out branch's PR first, and fits the real pane width. A lone
+  PR that is someone else's now asks instead of being auto-selected, its
+  rewrite defaults to no, and a run with no TTY stops instead of taking the
+  first row (#79).
+
 ### Added
 
 - feat(gai): Ollama now unloads the commit model 5s after the last request
