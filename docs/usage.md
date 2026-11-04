@@ -169,6 +169,13 @@ still takes it). Picking a PR that isn't yours turns the rewrite question into
 `[y/N]`, so its title and body stay as they are unless you say so. With no TTY
 gai stops with an error rather than choose a PR.
 
+The last row is **Create a new PR**. Picking it does what `gai issue` does when
+no PR is open (`gai pr --no-generate`, then attach), without the "Create a PR?"
+question: picking the row is the yes. It does not start with `#N:`, so
+claude-squad's `prRowRe` skips it and never answers it; an unattended batch
+still waits for you when only teammates' PRs are open. `--remove` does not show
+the row. It needs you standing in the issue's repo, like the no-PR case.
+
 Answering yes to the rewrite **is** the approval. The old flow asked
 `Apply this title and body? [Y/n]` *after* the model finished, which is exactly
 the wait this ordering removes: you sat watching a generation just to be asked
