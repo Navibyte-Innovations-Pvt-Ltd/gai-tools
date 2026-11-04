@@ -150,9 +150,24 @@ the one open PR of a repo you are already on a branch in gets two, not four. If 
 PR has to be created, `gai pr`'s own two questions (branch name, empty commit)
 follow immediately, with no slow step in between.
 
-With several open PRs, the picker shows how many issues each one already closes
-(`#2114: feat(invoices): … [5 issues]`, `[no issues]`), read from GitHub's
-`closingIssuesReferences`, so you can see which PR is already carrying a lot of work.
+With several open PRs, the picker shows whose each one is, its branch, its last
+commit and how many issues it already closes, read from GitHub's
+`closingIssuesReferences`. The PR from your checked-out branch comes first:
+
+```text
+  ▶ #779: @you · dev · 2026-11-02 · no issues · fix(issue-tracking): …
+    #766: @teammate · feat/763-text-booking-quest… · 2026-11-01 · 1 issue · …
+```
+
+The date is the last commit, not `updatedAt`: gai's own body edits bump
+`updatedAt`, so a stale PR would look fresh. It comes from GraphQL because
+`gh pr list --json commits` stops at a PR's first 100 commits.
+
+A lone PR is picked for you only if it is yours. If it is someone else's the
+same menu shows its one row, so nothing lands there unattended (`--remove`
+still takes it). Picking a PR that isn't yours turns the rewrite question into
+`[y/N]`, so its title and body stay as they are unless you say so. With no TTY
+gai stops with an error rather than choose a PR.
 
 Answering yes to the rewrite **is** the approval. The old flow asked
 `Apply this title and body? [Y/n]` *after* the model finished, which is exactly
