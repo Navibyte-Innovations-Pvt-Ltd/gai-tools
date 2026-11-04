@@ -44,7 +44,13 @@ _prune_logs() {
 
 _gai_select_menu() {
   local _idx=0 _count=$# _key _esc _i _opt _cols _max _opts=() _drawn=0
-  _cols=$(tput cols 2>/dev/null || echo 80)
+  # stty, not tput: with its output captured and stderr gone, tput answers 80
+  # whatever the pane is. A row that wraps ends the pane on a line claude-squad
+  # can't read as a menu row, and the redraw no longer lands on the rows.
+  _cols=$(stty size 2>/dev/null | cut -d' ' -f2 || true)
+  if [[ ! "$_cols" =~ ^[1-9][0-9]*$ ]]; then
+    _cols=80
+  fi
   _max=$(( _cols - 4 ))
   for _opt in "$@"; do
     if [[ "${#_opt}" -gt "$_max" ]]; then
@@ -1107,12 +1113,22 @@ if [[ "${1:-}" == "issue" ]]; then
   _pr_list=()
   while IFS= read -r _line; do
     [[ -n "$_line" ]] && _pr_list+=("$_line")
-  done < <(_gai_gh_read pr list --repo "$_issue_repo" --state open --json number,title,closingIssuesReferences,author \
+  done < <(_gai_gh_read pr list --repo "$_issue_repo" --state open --json number,title,closingIssuesReferences,author,headRefName \
     --jq '.[] | select(((.author.is_bot // false) or (.author.login | startswith("app/")) or (.author.login | endswith("[bot]"))) | not)
-      | "\(.number)|\(.closingIssuesReferences | length)|\(.title)"')
+      | "\(.number)|\(.closingIssuesReferences | length)|\(.author.login)|\(.headRefName | gsub("\\|"; "-"))|\(.title)"')
 
-  # "N issues" tag for a _pr_list entry (number|issue count|title — title last so a
-  # '|' inside it survives 'cut -f3-'). Shows how loaded a PR is before you add to it.
+  # Who you are decides whose PR this is: an empty answer counts as not yours.
+  _gh_me=$(_gai_gh_read api user --jq .login 2>/dev/null || true)
+
+  # Is the _pr_list entry $1 yours? A teammate's PR is never picked for you and
+  # its title and body are not rewritten by default.
+  _gai_pr_mine() {
+    [[ -n "$_gh_me" && "$(echo "$1" | cut -d'|' -f3)" == "$_gh_me" ]]
+  }
+
+  # "N issues" tag for a _pr_list entry (number|issue count|author|branch|title —
+  # title last so a '|' inside it survives 'cut -f5-'). Shows how loaded a PR is
+  # before you add to it.
   _gai_pr_issue_tag() {
     local _c
     _c=$(echo "$1" | cut -d'|' -f2)
@@ -1181,9 +1197,14 @@ if [[ "${1:-}" == "issue" ]]; then
   # The only PR there is needs no question — resolve it before the batch opens.
   _pr_num=""
   _pr_title=""
-  if [[ ${#_pr_list[@]} -eq 1 ]]; then
+  _pr_picked=""
+  # Unless it is someone else's: then the menu below asks, because claude-squad
+  # answers menus only for your own PR and a teammate's lone PR must not fill up
+  # unattended. --remove takes whatever PR holds the issue.
+  if [[ ${#_pr_list[@]} -eq 1 ]] && { [[ "$_issue_remove" == "true" ]] || _gai_pr_mine "${_pr_list[0]}"; }; then
     _pr_num=$(echo "${_pr_list[0]}" | cut -d'|' -f1)
-    _pr_title=$(echo "${_pr_list[0]}" | cut -d'|' -f3-)
+    _pr_title=$(echo "${_pr_list[0]}" | cut -d'|' -f5-)
+    _pr_picked="${_pr_list[0]}"
     echo "→ Auto-selecting PR #$_pr_num: $_pr_title [$(_gai_pr_issue_tag "${_pr_list[0]}")]"
   fi
 
@@ -1205,33 +1226,93 @@ if [[ "${1:-}" == "issue" ]]; then
       # Only --dry-run reaches here; a real headless run errored out above.
       _ans_create_pr=yes
     fi
-  elif [[ ${#_pr_list[@]} -gt 1 ]]; then
-    echo "Multiple open PRs — select one:"
+  elif [[ -z "$_pr_num" ]]; then
+    # With no TTY the menu would read EOF and silently take the first row.
+    if [[ "$_tty" != "true" ]]; then
+      echo "error: not a TTY — cannot choose a PR for ${_issue_label}. Run 'gai issue' in a terminal." >&2
+      exit 1
+    fi
+
+    # The PR from the branch you are on comes first, but only in that PR's repo:
+    # elsewhere the checked-out branch means nothing.
+    _here=""
+    if [[ "$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || true)" == "$_issue_repo" ]]; then
+      _here=$(git branch --show-current 2>/dev/null || true)
+    fi
+    _first=()
+    _rest=()
+    for _entry in "${_pr_list[@]}"; do
+      if [[ -n "$_here" && "$(echo "$_entry" | cut -d'|' -f4)" == "$_here" ]]; then
+        _first+=("$_entry")
+      else
+        _rest+=("$_entry")
+      fi
+    done
+    _pr_list=()
+    if [[ ${#_first[@]} -gt 0 ]]; then
+      _pr_list+=("${_first[@]}")
+    fi
+    if [[ ${#_rest[@]} -gt 0 ]]; then
+      _pr_list+=("${_rest[@]}")
+    fi
+
+    if [[ ${#_pr_list[@]} -eq 1 ]]; then
+      echo "The only open PR is someone else's — confirm it:"
+    else
+      echo "Multiple open PRs — select one:"
+    fi
+    # GraphQL, not 'gh pr list --json commits': that stops at a PR's first 100
+    # commits, so a big batch PR would show an old date. Never updatedAt either:
+    # gai's own body edits bump it and a stale PR looks fresh.
+    # shellcheck disable=SC2016  # $o and $r are GraphQL variables
+    _pr_dates=$(_gai_gh_read api graphql \
+      -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){pullRequests(states:OPEN,first:100){nodes{number commits(last:1){nodes{commit{committedDate}}}}}}}' \
+      -F o="${_issue_repo%%/*}" -F r="${_issue_repo##*/}" \
+      --jq '.data.repository.pullRequests.nodes[] | "\(.number) \(.commits.nodes[0].commit.committedDate // "")"' 2>/dev/null || true)
     _pr_options=()
     for _entry in "${_pr_list[@]}"; do
       _n=$(echo "$_entry" | cut -d'|' -f1)
-      _t=$(echo "$_entry" | cut -d'|' -f3-)
-      _pr_options+=("#$_n: $_t [$(_gai_pr_issue_tag "$_entry")]")
+      _a=$(echo "$_entry" | cut -d'|' -f3)
+      _b=$(echo "$_entry" | cut -d'|' -f4)
+      _d=$(printf '%s\n' "$_pr_dates" | awk -v n="$_n" '$1 == n { print substr($2, 1, 10) }')
+      _t=$(echo "$_entry" | cut -d'|' -f5-)
+      if [[ "${#_b}" -gt 28 ]]; then
+        _b="${_b:0:27}…"
+      fi
+      # Facts before the title: the menu cuts the end of a row to fit the tile.
+      # Keep "#N:" at the start — claude-squad finds the rows by it.
+      _pr_options+=("#${_n}: @${_a} · ${_b} · ${_d:-date unknown} · $(_gai_pr_issue_tag "$_entry") · ${_t}")
     done
     _gai_select_menu "${_pr_options[@]}"
     _idx=$_MENU_RESULT
     _pr_num=$(echo "${_pr_list[$_idx]}" | cut -d'|' -f1)
-    _pr_title=$(echo "${_pr_list[$_idx]}" | cut -d'|' -f3-)
+    _pr_title=$(echo "${_pr_list[$_idx]}" | cut -d'|' -f5-)
+    _pr_picked="${_pr_list[$_idx]}"
   fi
 
   # Asked before the model runs, not after: waiting on a generation only to be
   # asked whether it was wanted is the wait this flow exists to remove. Saying
   # yes here is the approval — the result is applied without a second prompt.
   if [[ "$_tty" == "true" ]] && [[ "$_need_new_pr" != "true" || "$_ans_create_pr" == "yes" ]]; then
-    if [[ "$_issue_remove" == "true" ]]; then
-      read -rp "Rewrite the PR title and body from the issues that remain? [Y/n] " _rw || true
+    if [[ -n "$_pr_picked" ]] && ! _gai_pr_mine "$_pr_picked"; then
+      # Someone else's PR: "no" unless you say otherwise. The [y/N] is also what
+      # stops claude-squad pressing Enter on this one for you.
+      read -rp "PR #${_pr_num} is @$(echo "$_pr_picked" | cut -d'|' -f3)'s. Rewrite its title and body too? [y/N] " _rw || true
+      case "$_rw" in
+        [Yy]*) _ans_rewrite=yes ;;
+        *)     _ans_rewrite=no ;;
+      esac
     else
-      read -rp "Rewrite the PR title and body from the issue thread? [Y/n] " _rw || true
+      if [[ "$_issue_remove" == "true" ]]; then
+        read -rp "Rewrite the PR title and body from the issues that remain? [Y/n] " _rw || true
+      else
+        read -rp "Rewrite the PR title and body from the issue thread? [Y/n] " _rw || true
+      fi
+      case "$_rw" in
+        [Nn]*) _ans_rewrite=no ;;
+        *)     _ans_rewrite=yes ;;
+      esac
     fi
-    case "$_rw" in
-      [Nn]*) _ans_rewrite=no ;;
-      *)     _ans_rewrite=yes ;;
-    esac
   fi
 
   # Detaching an issue is the opposite of starting work on it — never offer.
