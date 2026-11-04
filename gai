@@ -714,7 +714,7 @@ _gai_gh_read() {
       printf '%s\n' "$_out"
       return 0
     fi
-    grep -qiE 'i/o timeout|dial tcp|error connecting to|connection (reset|refused)|tls handshake|no such host|network is unreachable|client\.timeout|unexpected eof|HTTP 50[234]' "$_err" || break
+    grep -qiE 'i/o timeout|dial tcp|error connecting to|connection (reset|refused)|tls handshake|no such host|network is unreachable|client\.timeout|unexpected eof|HTTP 50[234]|status code: 50[234]' "$_err" || break
     [[ "$_try" -eq 4 ]] && break
     _wait=$((_try * 5))
     echo "  … GitHub unreachable — retry ${_try}/3 in ${_wait}s" >&2
@@ -1139,6 +1139,25 @@ if [[ "${1:-}" == "issue" ]]; then
     esac
   }
 
+  # Creating a PR needs you standing in the issue's repo. Used when no PR is
+  # open and when "Create a new PR" is picked from the menu.
+  _gai_new_pr_checks() {
+    if [[ "$_issue_dry_run" != "true" && "$_tty" == "true" ]]; then
+      _cwd_repo=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || true)
+
+      if [[ -z "$_cwd_repo" ]]; then
+        echo "error: not inside a GitHub repository — cd into ${_issue_repo} and re-run." >&2
+        exit 1
+      fi
+
+      if [[ "$_cwd_repo" != "$_issue_repo" ]]; then
+        echo "error: you are in ${_cwd_repo}, but ${_issue_label} lives in ${_issue_repo}." >&2
+        echo "  cd into ${_issue_repo} and re-run." >&2
+        exit 1
+      fi
+    fi
+  }
+
   # ── question phase ──────────────────────────────────────────────────────────
   # Everything the run needs to know is asked here, in one block, before the
   # first slow step. The old flow asked between steps — create a PR, wait, name
@@ -1172,20 +1191,7 @@ if [[ "${1:-}" == "issue" ]]; then
 
     # Fail on the wrong-repo cases before asking anything: a question the run
     # cannot act on is worse than no question.
-    if [[ "$_issue_dry_run" != "true" && "$_tty" == "true" ]]; then
-      _cwd_repo=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || true)
-
-      if [[ -z "$_cwd_repo" ]]; then
-        echo "error: not inside a GitHub repository — cd into ${_issue_repo} and re-run." >&2
-        exit 1
-      fi
-
-      if [[ "$_cwd_repo" != "$_issue_repo" ]]; then
-        echo "error: you are in ${_cwd_repo}, but ${_issue_label} lives in ${_issue_repo}." >&2
-        echo "  cd into ${_issue_repo} and re-run." >&2
-        exit 1
-      fi
-    fi
+    _gai_new_pr_checks
 
     # --dry-run writes nothing either way, so it has nothing to confirm.
     if [[ "$_tty" != "true" && "$_issue_dry_run" != "true" ]]; then
@@ -1283,11 +1289,25 @@ if [[ "${1:-}" == "issue" ]]; then
       # Keep "#N:" at the start — claude-squad finds the rows by it.
       _pr_options+=("#${_n}: @${_a} · ${_b} · ${_d:-date unknown} · $(_gai_pr_issue_tag "$_entry") · ${_t}")
     done
+    # Last row, never "#N:" (claude-squad's prRowRe must skip it, so it never
+    # answers it). Not in _pr_list, and not under --remove: nothing to detach
+    # from a PR that does not exist.
+    _new_row="Create a new PR"
+    if [[ "$_issue_remove" != "true" ]]; then
+      _pr_options+=("$_new_row")
+    fi
     _gai_select_menu "${_pr_options[@]}"
     _idx=$_MENU_RESULT
-    _pr_num=$(echo "${_pr_list[$_idx]}" | cut -d'|' -f1)
-    _pr_title=$(echo "${_pr_list[$_idx]}" | cut -d'|' -f5-)
-    _pr_picked="${_pr_list[$_idx]}"
+    if [[ "$_idx" -ge "${#_pr_list[@]}" ]]; then
+      # Same as no open PR, minus the question: picking the row is the yes.
+      _need_new_pr=true
+      _ans_create_pr=yes
+      _gai_new_pr_checks
+    else
+      _pr_num=$(echo "${_pr_list[$_idx]}" | cut -d'|' -f1)
+      _pr_title=$(echo "${_pr_list[$_idx]}" | cut -d'|' -f5-)
+      _pr_picked="${_pr_list[$_idx]}"
+    fi
   fi
 
   # Asked before the model runs, not after: waiting on a generation only to be
