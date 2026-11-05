@@ -66,7 +66,9 @@ gai pr
 ```
 
 Pushes the current branch, AI-generates a title and body from the commits ahead of
-the base branch, and opens the PR with you as assignee.
+the base branch, and opens the PR with you as assignee. Two runs for the same
+branch make one PR: the second prints `Another gai is writing the PR for 'dev' —
+waiting for it…`, then reuses the PR the first one opened.
 
 **Every question comes first, then it runs on its own.** Nothing after the last
 prompt asks anything — it prints a one-line plan and works through it:
@@ -215,7 +217,7 @@ Then it executes, in order:
    **Several runs on one PR at once are safe.** Each run re-reads the PR just
    before writing, under a per-PR lock in `/tmp`, and applies only its own change
    (add or drop one issue) to the body it finds then. A run that meets the lock
-   prints `Another gai issue is writing PR #N — waiting for it…` and goes next.
+   prints `Another gai is writing PR #N — waiting for it…` and goes next.
    Before this, overlapping runs each wrote back the body they had read up to a
    minute earlier, so the later one silently dropped the other's `Closes` line.
 
