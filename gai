@@ -401,9 +401,11 @@ _gai_pr_unlock() {
   fi
 }
 
+# $1: what the lock guards (default the issue flow's PR), $2: how to name it.
 _gai_pr_lock() {
+  local _key="${1:-${_issue_repo:-}#${_pr_num:-}}" _what="${2:-PR #${_pr_num:-}}"
   local _dir _owner _waited=0
-  _dir="/tmp/gai-pr-$(echo "${_issue_repo}#${_pr_num}" | md5).lock"
+  _dir="/tmp/gai-pr-$(echo "$_key" | md5).lock"
   while ! mkdir "$_dir" 2> /dev/null; do
     _owner=$(cat "$_dir/pid" 2> /dev/null || true)
     # No pid yet means the owner is between mkdir and writing it — keep waiting.
@@ -412,10 +414,10 @@ _gai_pr_lock() {
       continue
     fi
     if [[ $_waited -eq 0 ]]; then
-      echo "→ Another gai issue is writing PR #${_pr_num} — waiting for it…"
+      echo "→ Another gai is writing ${_what} — waiting for it…"
     fi
     if [[ $_waited -ge 150 ]]; then
-      echo "⚠ PR #${_pr_num} still locked after 30s — writing without the lock."
+      echo "⚠ ${_what} still locked after 30s — writing without the lock."
       return 0
     fi
     sleep 0.2
@@ -2053,7 +2055,13 @@ $PR_DIFF_STAT"
   # A PR may already exist for this branch (common when re-running after
   # 'gai issue'); reuse it only while it is still OPEN. A merged or closed PR
   # with the same head is history, not this PR.
+  # The lock is what makes that refusal reliable: two runs for one branch (the
+  # background runner and the window's queue both start `gai issue`) that call
+  # `gh pr create` in the same second both get through, as practise_stack #3072
+  # and #3073 did. Taken in turn, the second is refused and reuses the first.
   _pr_verb="created"
+  _pr_create_failed=false
+  _gai_pr_lock "create:${_pr_repo}:${CURRENT_BRANCH}:${BASE_BRANCH}" "the PR for '$CURRENT_BRANCH'"
   if ! PR_URL=$(gh pr create \
     --repo "$_pr_repo" \
     --base "$BASE_BRANCH" \
@@ -2061,6 +2069,12 @@ $PR_DIFF_STAT"
     --assignee @me \
     --title "$PR_TITLE" \
     --body "$PR_BODY"); then
+    _pr_create_failed=true
+  fi
+  _gai_pr_unlock
+  trap - EXIT INT TERM
+
+  if [[ "$_pr_create_failed" == "true" ]]; then
     _open_pr=$(gh pr list --repo "$_pr_repo" --head "$CURRENT_BRANCH" --base "$BASE_BRANCH" --state open \
       --json number,url --jq '.[0] | select(. != null) | "\(.number) \(.url)"' 2>/dev/null || true)
     if [[ -z "$_open_pr" ]]; then
