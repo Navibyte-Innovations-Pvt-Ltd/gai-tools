@@ -9,6 +9,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) — [Semantic V
 ## [Unreleased]
 ### Fixed
 
+- fix(pr): two runs for one branch no longer open two PRs. `gh pr create` now
+  runs under a lock per repo, branch and base, so the second run waits, is
+  refused and reuses the first PR (practise_stack #3072 and #3073).
 - fix(issue): the `gai issue` PR menu shows author, branch and last commit date,
   lists the checked-out branch's PR first, and fits the real pane width. A lone
   PR that is someone else's now asks instead of being auto-selected, its
